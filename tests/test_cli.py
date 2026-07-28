@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -107,3 +108,206 @@ def test_formats_parsing(argument, expected):
 def test_unsupported_format_is_rejected():
     with pytest.raises(cli.PipelineError, match="docx"):
         cli._formats("md,docx", {})
+
+
+# ---------------------------------------------------------------- run_pipeline
+
+TRANSCRIPT = {
+    "duration": 2.0,
+    "text": "первый второй",
+    "words": [
+        {"word": "первый", "start": 0.1, "end": 0.5, "confidence": 0.9},
+        {"word": "второй", "start": 1.1, "end": 1.6, "confidence": 0.8},
+    ],
+}
+DIARIZATION = {
+    "exclusive_segments": [
+        {"start": 0.0, "end": 1.0, "speaker": "SPEAKER_00"},
+        {"start": 1.0, "end": 2.0, "speaker": "SPEAKER_01"},
+    ],
+    "segments": [],
+}
+
+
+class Recorder:
+    """Counts how often each expensive stage actually ran."""
+
+    def __init__(self):
+        self.audio = 0
+        self.asr = 0
+        self.diarization = 0
+        self.audio_overwrite = []
+
+
+@pytest.fixture
+def pipeline(tmp_path, monkeypatch):
+    from fourvoices.audio import AudioInfo, PreparedAudio
+
+    calls = Recorder()
+    project = tmp_path / "project"
+    (project / "config").mkdir(parents=True)
+    (project / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+    config = project / "config" / "default.yaml"
+    config.write_text("project:\n  output_root: ../out\n", encoding="utf-8")
+    source = tmp_path / "запись.m4a"
+    source.write_bytes(b"audio-bytes")
+
+    def fake_prepare_audio(src, work_dir, **kwargs):
+        calls.audio += 1
+        calls.audio_overwrite.append(kwargs["overwrite"])
+        directory = Path(work_dir) / "audio"
+        directory.mkdir(parents=True, exist_ok=True)
+        for name in ("asr.wav", "diarization.wav"):
+            (directory / name).write_bytes(b"RIFF")
+        return PreparedAudio(
+            directory / "asr.wav",
+            directory / "diarization.wav",
+            AudioInfo(codec="aac", channels=1, sample_rate=16000, duration=2.0),
+        )
+
+    def fake_transcribe(audio_path, output_json, **kwargs):
+        calls.asr += 1
+        cli._atomic_json(Path(output_json), TRANSCRIPT)
+        return dict(TRANSCRIPT)
+
+    def fake_diarize(audio_path, output_json, **kwargs):
+        calls.diarization += 1
+        cli._atomic_json(Path(output_json), DIARIZATION)
+        return dict(DIARIZATION)
+
+    monkeypatch.setattr(cli, "prepare_audio", fake_prepare_audio)
+    monkeypatch.setattr(cli, "transcribe", fake_transcribe)
+    monkeypatch.setattr(cli, "diarize", fake_diarize)
+    monkeypatch.chdir(tmp_path)
+    return calls, source, config, project
+
+
+def run(source, config, *extra):
+    args = cli.build_parser().parse_args(
+        ["run", "--input", str(source), "--config", str(config), *extra]
+    )
+    return cli.run_pipeline(args)
+
+
+def test_run_produces_a_job_next_to_the_project_root(pipeline):
+    calls, source, config, project = pipeline
+    job = run(source, config)
+
+    assert job.parent == (project.parent / "out").resolve()
+    assert (job / "transcript.md").is_file()
+    assert (job / "manifest.json").is_file()
+    assert calls.asr == 1
+
+
+def test_second_run_reuses_every_expensive_stage(pipeline):
+    calls, source, config, _ = pipeline
+    run(source, config)
+    run(source, config)
+
+    assert (calls.asr, calls.diarization) == (1, 1)
+    assert calls.audio_overwrite == [True, False]
+
+
+def test_force_reruns_everything(pipeline):
+    calls, source, config, _ = pipeline
+    run(source, config)
+    run(source, config, "--force")
+
+    assert (calls.asr, calls.diarization) == (2, 2)
+    assert calls.audio_overwrite == [True, True]
+
+
+def test_changed_inference_option_is_refused_without_force(pipeline):
+    _, source, config, _ = pipeline
+    run(source, config)
+
+    with pytest.raises(cli.PipelineError, match="use --force"):
+        run(source, config, "--num-speakers", "3")
+
+
+def test_changed_audio_filter_is_refused_without_force(pipeline):
+    _, source, config, _ = pipeline
+    run(source, config)
+    config.write_text(
+        "project:\n  output_root: ../out\naudio:\n  asr_filter: highpass=f=200\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(cli.PipelineError, match="use --force"):
+        run(source, config)
+
+
+def test_thread_counts_do_not_invalidate_a_job(pipeline):
+    calls, source, config, _ = pipeline
+    run(source, config)
+    run(source, config, "--torch-threads", "4")
+
+    assert calls.asr == 1
+
+
+def test_a_lost_manifest_does_not_let_stale_stages_through(pipeline):
+    calls, source, config, _ = pipeline
+    job = run(source, config)
+    (job / "manifest.json").unlink()
+
+    run(source, config, "--num-speakers", "3")
+
+    # Without the manifest there is nothing vouching for the cached JSON, so the
+    # stages must be recomputed rather than silently mixed with new options.
+    assert (calls.asr, calls.diarization) == (2, 2)
+    manifest = json.loads((job / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["config"]["num_speakers"] == 3
+
+
+def test_a_different_input_in_the_same_job_directory_is_refused(pipeline, monkeypatch):
+    _, source, config, _ = pipeline
+    job = run(source, config)
+    manifest = json.loads((job / "manifest.json").read_text(encoding="utf-8"))
+    manifest["input"]["sha256"] = "0" * 64
+    (job / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(cli.PipelineError, match="different input"):
+        run(source, config)
+
+
+def test_speaker_map_renames_turns_on_rerender(pipeline):
+    _, source, config, _ = pipeline
+    job = run(source, config)
+    speaker_map = job / "speaker-map.yaml"
+    speaker_map.write_text("SPEAKER_00: Отец\nSPEAKER_01: Мать\n", encoding="utf-8")
+
+    args = cli.build_parser().parse_args(
+        ["render", "--job-dir", str(job), "--speaker-map", str(speaker_map)]
+    )
+    cli._render_job(args)
+
+    text = (job / "transcript.txt").read_text(encoding="utf-8")
+    assert "Отец" in text and "SPEAKER_00" not in text
+
+
+def test_rerender_keeps_the_formats_recorded_in_the_manifest(pipeline):
+    _, source, config, _ = pipeline
+    job = run(source, config, "--formats", "txt,srt")
+
+    args = cli.build_parser().parse_args(["render", "--job-dir", str(job)])
+    cli._render_job(args)
+
+    manifest = json.loads((job / "manifest.json").read_text(encoding="utf-8"))
+    assert sorted(manifest["stages"]["render"]["files"]) == [
+        "transcript.srt",
+        "transcript.txt",
+    ]
+
+
+def test_a_stage_missing_from_the_manifest_is_recomputed(pipeline):
+    calls, source, config, _ = pipeline
+    job = run(source, config)
+    manifest = json.loads((job / "manifest.json").read_text(encoding="utf-8"))
+    # An interrupted or older run can leave the product without its manifest entry.
+    del manifest["stages"]["asr"]
+    (job / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    run(source, config)
+
+    assert calls.asr == 2
+    assert calls.diarization == 1

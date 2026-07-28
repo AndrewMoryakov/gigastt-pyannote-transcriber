@@ -350,6 +350,18 @@ def run_pipeline(args: argparse.Namespace) -> Path:
         manifest["updated_at"] = _now()
         _atomic_json(manifest_path, manifest)
 
+    def can_reuse(stage: str, product: Path) -> bool:
+        """Reuse a stage only when the manifest vouches for it.
+
+        Keying on the file alone would let a missing or truncated manifest slip
+        past the "options changed" check above and silently splice together
+        stages produced with different settings.
+        """
+
+        if args.force or previous is None:
+            return False
+        return stage in previous.get("stages", {}) and product.is_file()
+
     giga_model_dir, pyannote_cache_dir = _model_directories(args, config, base)
     print("[1/5] Preparing separate ASR and diarization audio…", flush=True)
     prepared = prepare_audio(
@@ -358,7 +370,7 @@ def run_pipeline(args: argparse.Namespace) -> Path:
         allow_downmix=args.allow_downmix,
         ffmpeg=args.ffmpeg,
         ffprobe=args.ffprobe,
-        overwrite=args.force or previous is None,
+        overwrite=not can_reuse("audio", output_dir / "audio" / "asr.wav"),
         asr_filter=options["asr_filter"],
         diarization_filter=options["diarization_filter"],
     )
@@ -373,7 +385,7 @@ def run_pipeline(args: argparse.Namespace) -> Path:
 
     intermediate = output_dir / "intermediate"
     asr_path = intermediate / "gigastt.json"
-    if asr_path.is_file() and not args.force:
+    if can_reuse("asr", asr_path):
         print("[2/5] Reusing GigaSTT timestamps.", flush=True)
         transcript = load_transcript(asr_path)
     else:
@@ -402,7 +414,7 @@ def run_pipeline(args: argparse.Namespace) -> Path:
 
     diarization_path = intermediate / "pyannote.json"
     reused_diarization = False
-    if diarization_path.is_file() and not args.force:
+    if can_reuse("diarization", diarization_path):
         print("[3/5] Reusing pyannote diarization.", flush=True)
         diarization_result = load_diarization(diarization_path)
         reused_diarization = True
@@ -447,7 +459,7 @@ def run_pipeline(args: argparse.Namespace) -> Path:
     )
 
     merged_path = intermediate / "merged.json"
-    if merged_path.is_file() and not args.force:
+    if can_reuse("merge", merged_path):
         print("[4/5] Reusing merged transcript.", flush=True)
         merged = _load_json(merged_path)
     else:
