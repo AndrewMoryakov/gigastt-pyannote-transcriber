@@ -2,7 +2,7 @@
 name = "fourvoices"
 version = "0.1.0"
 description = "Локальная транскрибация русской речи: GigaSTT + pyannote Community-1"
-readme = "README_RU.md"
+readme = "README.md"
 requires-python = "==3.11.*"
 dependencies = [
     "pyannote.audio==4.0.7",

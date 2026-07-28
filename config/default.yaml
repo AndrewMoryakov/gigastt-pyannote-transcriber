@@ -1,7 +1,7 @@
 # Every key here is read by the pipeline; unknown keys are rejected so a typo
 # cannot quietly look like a setting. Relative paths resolve against the project
 # root (the nearest enclosing directory with pyproject.toml), not the current
-# working directory. README_RU.md explains the reasoning behind each default and
+# working directory. README.md explains the reasoning behind each default and
 # what changes if you move it.
 
 project:
