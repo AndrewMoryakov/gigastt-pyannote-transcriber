@@ -303,9 +303,11 @@ def run_pipeline(args: argparse.Namespace) -> Path:
     )
 
     diarization_path = intermediate / "pyannote.json"
+    reused_diarization = False
     if diarization_path.is_file() and not args.force:
         print("[3/5] Reusing pyannote diarization.", flush=True)
         diarization_result = load_diarization(diarization_path)
+        reused_diarization = True
     else:
         print(
             f"[3/5] Running pinned Community-1 ({options['num_speakers']} speakers)…",
@@ -319,10 +321,21 @@ def run_pipeline(args: argparse.Namespace) -> Path:
             cache_dir=pyannote_cache_dir,
             torch_threads=options["torch_threads"],
             torch_interop_threads=options["torch_interop_threads"],
+            strict_speakers=args.strict_speakers,
         )
     labels = sorted(
         {segment["speaker"] for segment in diarization_result["exclusive_segments"]}
     )
+    if reused_diarization and len(labels) != options["num_speakers"]:
+        # diarize() already reported this for a fresh run; a resumed run must not
+        # silently accept a mismatch the first run refused.
+        message = (
+            f"Requested {options['num_speakers']} speakers but the reused diarization "
+            f"has {len(labels)} ({', '.join(labels) or 'none'})."
+        )
+        if args.strict_speakers:
+            raise PipelineError(message)
+        print(f"warning: {message}", file=sys.stderr, flush=True)
     mark(
         "diarization",
         {
@@ -330,6 +343,8 @@ def run_pipeline(args: argparse.Namespace) -> Path:
             "model": MODEL_ID,
             "revision": MODEL_REVISION,
             "speakers": labels,
+            "requested_num_speakers": options["num_speakers"],
+            "speaker_count_matches_request": len(labels) == options["num_speakers"],
         },
     )
 
@@ -469,6 +484,11 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--speaker-map")
     run.add_argument("--speaker-name", action="append", default=[], metavar="LABEL=NAME")
     run.add_argument("--allow-downmix", action="store_true")
+    run.add_argument(
+        "--strict-speakers",
+        action="store_true",
+        help="Fail when diarization finds a different speaker count (result is still saved)",
+    )
     run.add_argument("--force", action="store_true")
     run.add_argument("--ffmpeg", default="ffmpeg")
     run.add_argument("--ffprobe", default="ffprobe")

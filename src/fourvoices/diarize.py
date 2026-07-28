@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -63,6 +64,10 @@ def _load_waveform(audio_path: Path) -> tuple[Any, int, float]:
     return waveform, int(sample_rate), samples.shape[0] / float(sample_rate)
 
 
+class SpeakerCountMismatch(DiarizationError):
+    """Diarization succeeded but found a different number of speakers."""
+
+
 def diarize(
     audio_path: str | Path,
     output_json: str | Path,
@@ -73,8 +78,15 @@ def diarize(
     cache_dir: str | Path | None = None,
     torch_threads: int = 16,
     torch_interop_threads: int = 1,
+    strict_speakers: bool = False,
 ) -> dict[str, Any]:
-    """Run the revision-pinned pipeline and save regular + exclusive annotations."""
+    """Run the revision-pinned pipeline and save regular + exclusive annotations.
+
+    A speaker-count mismatch is recorded in the payload rather than discarding the
+    result: diarization is the most expensive stage, and one participant staying
+    almost silent is a plausible recording, not a pipeline failure. Pass
+    ``strict_speakers`` to raise afterwards; the JSON is written either way.
+    """
 
     if num_speakers < 1:
         raise ValueError("num_speakers must be positive")
@@ -132,21 +144,22 @@ def diarize(
             "Community-1 did not return exclusive_speaker_diarization; "
             "verify that pyannote.audio 4.x is installed."
         )
+    exclusive_segments = _segments(exclusive_annotation)
+    found = sorted({item["speaker"] for item in exclusive_segments})
     payload = {
         "schema_version": 1,
         "model": MODEL_ID,
         "revision": MODEL_REVISION,
         "num_speakers": num_speakers,
+        "requested_num_speakers": num_speakers,
+        "found_speakers": found,
+        "speaker_count_matches_request": len(found) == num_speakers,
         "duration_s": duration,
         "segments": _segments(regular_annotation),
-        "exclusive_segments": _segments(exclusive_annotation),
+        "exclusive_segments": exclusive_segments,
     }
-    found = {item["speaker"] for item in payload["exclusive_segments"]}
-    if len(found) != num_speakers:
-        raise DiarizationError(
-            f"Requested {num_speakers} speakers but pyannote returned {len(found)}."
-        )
 
+    # Persist before judging: a rejected result must still be resumable.
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_name(destination.name + ".partial")
     try:
@@ -156,6 +169,15 @@ def diarize(
         os.replace(temporary, destination)
     finally:
         temporary.unlink(missing_ok=True)
+
+    if len(found) != num_speakers:
+        message = (
+            f"Requested {num_speakers} speakers but pyannote returned {len(found)} "
+            f"({', '.join(found) or 'none'}). The result is saved in {destination.name}."
+        )
+        if strict_speakers:
+            raise SpeakerCountMismatch(message)
+        print(f"warning: {message}", file=sys.stderr, flush=True)
     return payload
 
 
