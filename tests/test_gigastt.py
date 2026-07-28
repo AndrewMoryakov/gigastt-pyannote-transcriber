@@ -44,3 +44,28 @@ def test_transcribe_uses_supported_v215_flags(tmp_path, monkeypatch):
     assert "--vad" in seen["command"]
     assert payload["words"][0]["word"] == "тест"
     assert destination.is_file()
+
+
+def test_unparsable_output_is_kept_for_inspection(tmp_path, monkeypatch):
+    import pytest
+
+    from fourvoices.gigastt import GigaSTTError
+
+    source = tmp_path / "input.wav"
+    source.write_bytes(b"RIFF")
+    destination = tmp_path / "result.json"
+
+    def fake_run(command, **kwargs):
+        output = command[command.index("--output") + 1]
+        with open(output, "w", encoding="utf-8") as stream:
+            stream.write('{"segments": []}')  # no word timestamps
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(GigaSTTError, match="rejected"):
+        transcribe(source, destination, executable="gigastt.exe")
+
+    rejected = tmp_path / "result.json.rejected"
+    assert rejected.read_text(encoding="utf-8") == '{"segments": []}'
+    assert not destination.exists()
+    assert not (tmp_path / "result.json.partial").exists()

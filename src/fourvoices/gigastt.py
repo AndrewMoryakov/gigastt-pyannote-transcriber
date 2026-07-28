@@ -119,12 +119,20 @@ def transcribe(
     except subprocess.CalledProcessError as exc:
         detail = (exc.stderr or exc.stdout or "").strip()
         raise GigaSTTError(f"GigaSTT exited with code {exc.returncode}: {detail}") from exc
+    if temporary.is_file():
+        raw = temporary.read_text(encoding="utf-8-sig")
+    else:
+        raw = completed.stdout
     try:
-        if temporary.is_file():
-            raw = temporary.read_text(encoding="utf-8-sig")
-        else:
-            raw = completed.stdout
         payload = parse_gigastt_json(raw)
+    except GigaSTTError as exc:
+        # Keep the unparsed output: if GigaSTT changes its schema, this file is
+        # the only evidence of what it actually produced.
+        rejected = destination.with_name(destination.name + ".rejected")
+        rejected.write_text(raw, encoding="utf-8")
+        temporary.unlink(missing_ok=True)
+        raise GigaSTTError(f"{exc} Raw output kept in {rejected.name}.") from exc
+    try:
         temporary.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
         )

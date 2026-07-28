@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -191,11 +190,3 @@ def prepare_audio(
     if overwrite or not valid_product(asr_path):
         _convert(source_path, asr_path, ffmpeg=ffmpeg, audio_filter=asr_filter)
     return PreparedAudio(asr_path, diar_path, info)
-
-
-def check_ffmpeg(ffmpeg: str = "ffmpeg", ffprobe: str = "ffprobe") -> None:
-    """Fail early if either executable cannot be located."""
-
-    missing = [name for name in (ffmpeg, ffprobe) if shutil.which(name) is None]
-    if missing:
-        raise AudioPreparationError("Missing executable(s) on PATH: " + ", ".join(missing))
