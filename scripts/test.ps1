@@ -11,6 +11,11 @@ if ($LASTEXITCODE -ne 0) {
     throw 'Проверка гигиены репозитория завершилась с ошибкой.'
 }
 
+& uv run --python 3.11 ruff check src tests
+if ($LASTEXITCODE -ne 0) {
+    throw "ruff нашёл замечания (код $LASTEXITCODE)."
+}
+
 & uv run --python 3.11 pytest
 if ($LASTEXITCODE -ne 0) {
     throw "pytest завершился с кодом $LASTEXITCODE."

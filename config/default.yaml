@@ -1,34 +1,64 @@
 # Every key here is read by the pipeline; unknown keys are rejected so a typo
 # cannot quietly look like a setting. Relative paths resolve against the project
 # root (the nearest enclosing directory with pyproject.toml), not the current
-# working directory.
+# working directory. README_RU.md explains the reasoning behind each default and
+# what changes if you move it.
 
 project:
-  # Keep generated transcripts and intermediate WAV outside the Git checkout.
+  # Keep generated transcripts and intermediate WAV outside the Git checkout:
+  # a job directory holds the source audio's copy, and no .gitignore rule can be
+  # relied on to stop `git add -f`.
   output_root: ../gigastt-pyannote-output
 
 audio:
-  # Keep diarization audio close to the source: resample/downmix only.
+  # Diarization gets the audio as close to the source as possible: loudness
+  # normalisation and denoising alter exactly the timbre that voice clustering
+  # relies on. Only resampling and downmixing happen here.
   diarization_filter: null
-  # Mild ASR-only cleanup. Do not use this copy for voice clustering.
+  # The ASR copy may be cleaned, because recognition cares about intelligibility
+  # rather than voice identity. 80 Hz is below the fundamental of any speaking
+  # voice, so the high-pass removes rumble and handling noise without touching
+  # speech; loudnorm brings a quiet recording up to a level GigaAM expects.
   asr_filter: "highpass=f=80,loudnorm=I=-18:LRA=11:TP=-2"
 
 asr:
+  # GigaAM v3 offers RNNT and CTC. RNNT is slower but more accurate on
+  # spontaneous, overlapping speech, which is what this pipeline is for.
   model_variant: rnnt
   model_dir: models/gigastt
+  # GigaSTT applies punctuation and ITN to the top-level text only, leaving
+  # words[] raw. merge projects the processed spelling back onto the timestamped
+  # words, and only where the normalised forms match exactly, so a rewrite such
+  # as "двадцать три" -> "23" falls back to the raw word instead of inventing an
+  # alignment. Turning these off costs readability, not timings.
   punctuation: true
   itn: true
+  # Voice activity detection keeps the recogniser out of long silences, where it
+  # would otherwise be free to invent text.
   vad: true
 
 diarization:
+  # Pinned by name and by revision: an upstream update must never silently
+  # change what an already-issued transcript would say. The CLI refuses any
+  # other value rather than quietly using an unreviewed artifact.
   model: pyannote/speaker-diarization-community-1
   revision: 3533c8cf8e369892e6b79ff1bf80f7b0286a54ee
   model_dir: models/pyannote
+  # CPU by design; the pinned PyTorch build has no CUDA.
   device: cpu
+  # The speaker count is given, not inferred: a fixed count makes clustering
+  # reproducible. If pyannote returns a different number the result is still
+  # saved and the run warns (see --strict-speakers).
   num_speakers: 4
 
 merge:
+  # Silence inside one speaker's turn before it is split into a separate turn.
+  # Spontaneous speech pauses well under a second between sentences, so 1.5 s
+  # avoids splitting on breathing; lower it for shorter, more granular turns.
   max_turn_gap: 1.5
+  # How far a word may sit from the nearest exclusive segment before its speaker
+  # becomes UNKNOWN. Raising it labels more words at the cost of guessing;
+  # lowering it leaves more of them explicitly unattributed.
   nearest_max_gap: 0.5
 
 output:
@@ -40,7 +70,8 @@ output:
     - vtt
   # Mark turns whose speaker attribution is not confirmed by exclusive overlap.
   mark_uncertain_words: true
-  # SRT/VTT cue limits. A turn longer than this is cut on word boundaries so the
-  # timings stay real. Set either to 0 to disable that limit.
+  # SRT/VTT cue limits: roughly two lines of 42 characters, on screen for a few
+  # seconds. A longer turn is cut on word boundaries so the timings stay real.
+  # Set either to 0 to disable that limit.
   subtitle_max_seconds: 6
   subtitle_max_chars: 84

@@ -9,7 +9,13 @@ param(
     [ValidateRange(1, 32)]
     [int]$NumSpeakers = 4,
     [switch]$AllowDownmix,
-    [switch]$StrictSpeakers
+    [switch]$StrictSpeakers,
+
+    # Defaults suit a 16-core CPU; set to your own physical core count.
+    [ValidateRange(1, 256)]
+    [int]$TorchThreads = 16,
+    [ValidateRange(1, 256)]
+    [int]$TorchInteropThreads = 1
 )
 
 . (Join-Path $PSScriptRoot 'common.ps1')
@@ -44,7 +50,9 @@ foreach ($item in $InputAudio) {
         '--config', (Resolve-RepoPath -Path $Config),
         '--gigastt-exe', $exe,
         '--model-dir', $gigaModelDir,
-        '--num-speakers', $NumSpeakers.ToString()
+        '--num-speakers', $NumSpeakers.ToString(),
+        '--torch-threads', $TorchThreads.ToString(),
+        '--torch-interop-threads', $TorchInteropThreads.ToString()
     )
     if ($SpeakerMap) {
         $arguments += @('--speaker-map', (Resolve-RepoPath -Path $SpeakerMap))

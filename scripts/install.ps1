@@ -55,7 +55,10 @@ if ($InstallFfmpeg -and -not (Get-Command ffmpeg -ErrorAction SilentlyContinue))
     }
 }
 
-foreach ($directory in @('media', 'transcripts', 'models', 'tools\bin', 'tools\downloads')) {
+# Transcripts land in the output root outside the checkout, so no directory for
+# them is created here; .gitignore and check-repo-hygiene.ps1 still guard the
+# name in case anything writes there.
+foreach ($directory in @('media', 'models', 'tools\bin', 'tools\downloads')) {
     New-Item -ItemType Directory -Force -Path (Join-Path $repo $directory) | Out-Null
 }
 
