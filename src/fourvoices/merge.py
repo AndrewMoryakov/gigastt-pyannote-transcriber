@@ -9,6 +9,25 @@ from typing import Any, Iterable, Mapping, Sequence
 
 UNKNOWN_SPEAKER = "UNKNOWN"
 
+# A turn is flagged when at least this share of its words lack a confirmed
+# speaker. One hedged word in a long sentence is normal; half of them is not.
+UNCERTAIN_TURN_SHARE = 0.5
+
+
+def word_is_uncertain(word: Mapping[str, Any]) -> bool:
+    """Whether this word's speaker rests on something weaker than overlap.
+
+    ``nearest`` and ``unknown`` mean pyannote had no exclusive segment covering
+    the word, and ``ambiguous`` means two speakers tied. All three are cases a
+    human should re-listen to before quoting. A word carrying no assignment
+    evidence at all is not treated as doubtful.
+    """
+
+    if word.get("ambiguous"):
+        return True
+    assignment = word.get("assignment")
+    return assignment is not None and str(assignment) != "overlap"
+
 
 def interval_overlap(a_start: float, a_end: float, b_start: float, b_end: float) -> float:
     return max(0.0, min(a_end, b_end) - max(a_start, b_start))
@@ -221,6 +240,7 @@ def build_turns(
             groups[-1].append(word)
     turns: list[dict[str, Any]] = []
     for index, group in enumerate(groups, start=1):
+        uncertain_words = sum(1 for word in group if word_is_uncertain(word))
         turns.append(
             {
                 "id": index,
@@ -230,6 +250,8 @@ def build_turns(
                 "text": join_words(str(w.get("display_word", w["word"])) for w in group),
                 "raw_text": join_words(str(w["word"]) for w in group),
                 "overlap": any(bool(w.get("overlap")) for w in group),
+                "uncertain_words": uncertain_words,
+                "uncertain": uncertain_words >= len(group) * UNCERTAIN_TURN_SHARE,
                 "confidence": _confidence(group),
                 "word_start": int(group[0].get("index", 0)),
                 "word_end": int(group[-1].get("index", 0)),

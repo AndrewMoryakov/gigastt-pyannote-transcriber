@@ -57,3 +57,51 @@ def test_json_is_utf8_friendly_and_round_trips():
     rendered = render_json(DATA)
     assert "\\u041f" not in rendered
     assert json.loads(rendered) == DATA
+
+
+UNCERTAIN_DATA = {
+    "turns": [
+        {
+            "id": 1,
+            "speaker": "SPEAKER_00",
+            "start": 0.0,
+            "end": 1.0,
+            "text": "Возможно.",
+            "overlap": False,
+            "uncertain": True,
+            "uncertain_words": 1,
+        },
+        {
+            "id": 2,
+            "speaker": "SPEAKER_01",
+            "start": 1.0,
+            "end": 2.0,
+            "text": "Точно.",
+            "overlap": True,
+            "uncertain": True,
+            "uncertain_words": 1,
+        },
+    ]
+}
+
+
+def test_uncertain_turns_are_marked_in_every_text_format():
+    assert "[спикер под вопросом]" in render_txt(UNCERTAIN_DATA)
+    assert "**спикер под вопросом**" in render_md(UNCERTAIN_DATA)
+    assert "[спикер под вопросом]" in render_srt(UNCERTAIN_DATA)
+    assert "[спикер под вопросом]" in render_vtt(UNCERTAIN_DATA)
+
+
+def test_both_markers_appear_together_and_in_a_stable_order():
+    line = render_txt(UNCERTAIN_DATA).splitlines()[1]
+    assert "[перекрытие речи, спикер под вопросом]" in line
+
+
+def test_marking_can_be_disabled_without_touching_the_overlap_marker():
+    text = render_txt(UNCERTAIN_DATA, mark_uncertain=False)
+    assert "спикер под вопросом" not in text
+    assert "[перекрытие речи]" in text
+
+
+def test_turns_without_the_field_are_never_marked():
+    assert "спикер под вопросом" not in render_txt(DATA)

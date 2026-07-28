@@ -116,3 +116,37 @@ def test_merge_assigns_words_flags_overlap_and_builds_turns():
     assert result["words"][1]["overlap"] is True
     assert len(result["turns"]) == 2
     assert result["duration_s"] == 2.0
+
+
+def test_turn_is_flagged_only_when_half_its_words_lack_confirmed_speakers():
+    def word(index, assignment, ambiguous=False):
+        return {
+            "index": index,
+            "word": f"w{index}",
+            "start": index * 0.5,
+            "end": index * 0.5 + 0.4,
+            "speaker": "A",
+            "assignment": assignment,
+            "ambiguous": ambiguous,
+        }
+
+    mostly_confirmed = build_turns([word(0, "overlap"), word(1, "overlap"), word(2, "nearest")])
+    assert mostly_confirmed[0]["uncertain_words"] == 1
+    assert mostly_confirmed[0]["uncertain"] is False
+
+    half_unconfirmed = build_turns([word(0, "overlap"), word(1, "unknown")])
+    assert half_unconfirmed[0]["uncertain"] is True
+
+    tied = build_turns([word(0, "overlap", ambiguous=True)])
+    assert tied[0]["uncertain"] is True
+
+
+def test_merge_marks_a_turn_resting_on_the_nearest_segment():
+    transcript = {"duration": 6.0, "words": [{"word": "эхо", "start": 5.0, "end": 5.2}]}
+    diarization = {
+        "exclusive_segments": [{"start": 4.0, "end": 4.9, "speaker": "A"}],
+        "segments": [],
+    }
+    result = merge_transcript(transcript, diarization)
+    assert result["words"][0]["assignment"] == "nearest"
+    assert result["turns"][0]["uncertain"] is True

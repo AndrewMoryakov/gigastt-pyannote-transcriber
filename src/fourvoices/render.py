@@ -22,10 +22,27 @@ def _display_name(speaker: str, names: Mapping[str, str] | None) -> str:
     return str((names or {}).get(speaker, speaker))
 
 
-def render_txt(data: Mapping[str, Any], *, names: Mapping[str, str] | None = None) -> str:
+def _markers(turn: Mapping[str, Any], *, mark_uncertain: bool) -> list[str]:
+    """Human-readable warnings attached to a turn, in fixed order."""
+
+    markers = []
+    if turn.get("overlap"):
+        markers.append("перекрытие речи")
+    if mark_uncertain and turn.get("uncertain"):
+        markers.append("спикер под вопросом")
+    return markers
+
+
+def render_txt(
+    data: Mapping[str, Any],
+    *,
+    names: Mapping[str, str] | None = None,
+    mark_uncertain: bool = True,
+) -> str:
     lines = []
     for turn in data.get("turns", []):
-        marker = " [перекрытие речи]" if turn.get("overlap") else ""
+        found = _markers(turn, mark_uncertain=mark_uncertain)
+        marker = f" [{', '.join(found)}]" if found else ""
         lines.append(
             f"[{clock(turn['start'])}–{clock(turn['end'])}] "
             f"{_display_name(str(turn['speaker']), names)}{marker}: {turn['text']}"
@@ -37,6 +54,7 @@ def render_md(
     data: Mapping[str, Any],
     *,
     names: Mapping[str, str] | None = None,
+    mark_uncertain: bool = True,
     title: str = "Транскрипция аудиозаписи",
 ) -> str:
     lines = [
@@ -47,7 +65,8 @@ def render_md(
         "",
     ]
     for turn in data.get("turns", []):
-        marker = " · **перекрытие речи**" if turn.get("overlap") else ""
+        found = _markers(turn, mark_uncertain=mark_uncertain)
+        marker = "".join(f" · **{item}**" for item in found)
         lines.extend(
             [
                 f"**[{clock(turn['start'])}–{clock(turn['end'])}] "
@@ -71,6 +90,7 @@ def _subtitle_lines(
     names: Mapping[str, str] | None,
     srt: bool,
     max_line_chars: int,
+    mark_uncertain: bool,
 ) -> list[str]:
     lines: list[str] = []
     for index, turn in enumerate(turns, start=1):
@@ -81,7 +101,8 @@ def _subtitle_lines(
             f"{_subtitle_time(float(turn['end']), srt=srt)}"
         )
         label = _display_name(str(turn["speaker"]), names)
-        marker = " [перекрытие речи]" if turn.get("overlap") else ""
+        found = _markers(turn, mark_uncertain=mark_uncertain)
+        marker = f" [{', '.join(found)}]" if found else ""
         value = f"{label}{marker}: {turn['text']}"
         wrapped = textwrap.wrap(
             value,
@@ -98,6 +119,7 @@ def render_srt(
     data: Mapping[str, Any],
     *,
     names: Mapping[str, str] | None = None,
+    mark_uncertain: bool = True,
     max_line_chars: int = 80,
 ) -> str:
     return "\n".join(
@@ -106,6 +128,7 @@ def render_srt(
             names=names,
             srt=True,
             max_line_chars=max_line_chars,
+            mark_uncertain=mark_uncertain,
         )
     ).rstrip() + "\n"
 
@@ -114,6 +137,7 @@ def render_vtt(
     data: Mapping[str, Any],
     *,
     names: Mapping[str, str] | None = None,
+    mark_uncertain: bool = True,
     max_line_chars: int = 80,
 ) -> str:
     body = _subtitle_lines(
@@ -121,6 +145,7 @@ def render_vtt(
         names=names,
         srt=False,
         max_line_chars=max_line_chars,
+        mark_uncertain=mark_uncertain,
     )
     return "WEBVTT\n\n" + "\n".join(body).rstrip() + "\n"
 
@@ -134,6 +159,7 @@ def render(
     format_name: str,
     *,
     names: Mapping[str, str] | None = None,
+    mark_uncertain: bool = True,
 ) -> str:
     key = format_name.lower().lstrip(".")
     functions = {
@@ -144,10 +170,9 @@ def render(
     }
     if key == "json":
         return render_json(data)
-    try:
-        return functions[key](data, names=names)
-    except KeyError as exc:
-        raise ValueError(f"Unsupported output format: {format_name}") from exc
+    if key not in functions:
+        raise ValueError(f"Unsupported output format: {format_name}")
+    return functions[key](data, names=names, mark_uncertain=mark_uncertain)
 
 
 def write_outputs(
@@ -157,6 +182,7 @@ def write_outputs(
     stem: str = "transcript",
     formats: Sequence[str] = ("md", "txt", "srt", "vtt", "json"),
     names: Mapping[str, str] | None = None,
+    mark_uncertain: bool = True,
 ) -> list[Path]:
     directory = Path(output_dir)
     directory.mkdir(parents=True, exist_ok=True)
@@ -164,6 +190,9 @@ def write_outputs(
     for format_name in formats:
         suffix = format_name.lower().lstrip(".")
         path = directory / f"{stem}.{suffix}"
-        path.write_text(render(data, suffix, names=names), encoding="utf-8")
+        path.write_text(
+            render(data, suffix, names=names, mark_uncertain=mark_uncertain),
+            encoding="utf-8",
+        )
         written.append(path)
     return written

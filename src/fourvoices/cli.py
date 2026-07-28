@@ -17,7 +17,7 @@ from typing import Any, Mapping, Sequence
 import yaml
 
 from . import __version__
-from .audio import AudioPreparationError, prepare_audio
+from .audio import DEFAULT_ASR_FILTER, AudioPreparationError, prepare_audio
 from .diarize import (
     DEFAULT_NUM_SPEAKERS,
     MODEL_ID,
@@ -34,6 +34,49 @@ from .render import write_outputs
 
 class PipelineError(RuntimeError):
     """Configuration, validation, or resumability check failed."""
+
+
+# Every key the pipeline actually reads. Anything else is rejected instead of
+# being silently ignored, so a typo or a stale key cannot look like a setting.
+CONFIG_SCHEMA: dict[str, frozenset[str]] = {
+    "project": frozenset({"output_root"}),
+    "audio": frozenset({"asr_filter", "diarization_filter"}),
+    "asr": frozenset({"model_variant", "model_dir", "punctuation", "itn", "vad"}),
+    "diarization": frozenset(
+        {"model", "revision", "model_dir", "device", "num_speakers"}
+    ),
+    "merge": frozenset({"max_turn_gap", "nearest_max_gap"}),
+    "output": frozenset({"formats", "mark_uncertain_words"}),
+}
+
+
+def validate_config(config: Mapping[str, Any]) -> None:
+    """Reject unknown sections and keys."""
+
+    problems: list[str] = []
+    for section, value in config.items():
+        if section not in CONFIG_SCHEMA:
+            problems.append(f"unknown section '{section}'")
+            continue
+        if value is None:
+            continue
+        if not isinstance(value, Mapping):
+            problems.append(f"section '{section}' must be a mapping")
+            continue
+        for key in value:
+            if key not in CONFIG_SCHEMA[section]:
+                problems.append(f"unknown key '{section}.{key}'")
+    if problems:
+        raise PipelineError(
+            "Configuration problems: "
+            + "; ".join(sorted(problems))
+            + ". Supported keys: "
+            + ", ".join(
+                f"{section}.{key}"
+                for section in sorted(CONFIG_SCHEMA)
+                for key in sorted(CONFIG_SCHEMA[section])
+            )
+        )
 
 
 def _now() -> str:
@@ -89,6 +132,39 @@ def _load_yaml(path: str | Path | None) -> tuple[dict[str, Any], Path | None]:
     return value, config_path
 
 
+def _load_config(path: str | Path | None) -> tuple[dict[str, Any], Path | None]:
+    """Load and validate the pipeline configuration (not the speaker map)."""
+
+    config, config_path = _load_yaml(path)
+    validate_config(config)
+    return config, config_path
+
+
+def _project_root(config_path: Path | None) -> Path | None:
+    """Return the directory that relative configuration paths are relative to.
+
+    Paths in the YAML are written from the project's point of view (``models/``,
+    ``../output``), not from whatever directory the command happens to run in,
+    so they are anchored to the nearest enclosing project (the directory holding
+    ``pyproject.toml``) and fall back to the configuration's own directory.
+    """
+
+    if config_path is None:
+        return None
+    directory = config_path.parent
+    for candidate in [directory, *directory.parents][:5]:
+        if (candidate / "pyproject.toml").is_file():
+            return candidate
+    return directory
+
+
+def _config_path(value: Any, base: Path | None) -> Path:
+    path = Path(str(value)).expanduser()
+    if path.is_absolute() or base is None:
+        return path.resolve()
+    return (base / path).resolve()
+
+
 def _at(config: Mapping[str, Any], *keys: str, default: Any = None) -> Any:
     value: Any = config
     for key in keys:
@@ -110,7 +186,10 @@ def _switch(value: Any, default: str = "on") -> str:
 
 
 def _speaker_names(
-    speaker_map: str | Path | None, inline: Sequence[str] = ()
+    speaker_map: str | Path | None,
+    inline: Sequence[str] = (),
+    *,
+    known: Sequence[str] | None = None,
 ) -> dict[str, str]:
     names: dict[str, str] = {}
     if speaker_map:
@@ -125,6 +204,18 @@ def _speaker_names(
         if not label or not name:
             raise PipelineError(f"Invalid speaker name '{item}'.")
         names[label] = name
+    if known is not None:
+        # A mistyped label renames nobody; without this the rename looks applied.
+        unused = sorted(set(names) - set(known))
+        if unused:
+            print(
+                "warning: these labels are not in the transcript and were ignored: "
+                + ", ".join(unused)
+                + ". Available labels: "
+                + (", ".join(known) or "none"),
+                file=sys.stderr,
+                flush=True,
+            )
     return names
 
 
@@ -171,8 +262,12 @@ def _resolved_run_options(args: argparse.Namespace, config: Mapping[str, Any]) -
         raise PipelineError("PyTorch thread counts must be positive.")
     if getattr(args, "encoder_threads", None) is not None and args.encoder_threads < 1:
         raise PipelineError("--encoder-threads must be positive.")
+    asr_filter = _at(config, "audio", "asr_filter", default=DEFAULT_ASR_FILTER)
+    diarization_filter = _at(config, "audio", "diarization_filter")
     return {
         "num_speakers": num_speakers,
+        "asr_filter": str(asr_filter) if asr_filter else None,
+        "diarization_filter": str(diarization_filter) if diarization_filter else None,
         "model_variant": args.model_variant
         or str(_at(config, "asr", "model_variant", default="rnnt")),
         "punctuation": args.punctuation
@@ -191,35 +286,32 @@ def _resolved_run_options(args: argparse.Namespace, config: Mapping[str, Any]) -
 
 
 def _model_directories(
-    args: argparse.Namespace, config: Mapping[str, Any]
+    args: argparse.Namespace, config: Mapping[str, Any], base: Path | None
 ) -> tuple[Path | None, Path | None]:
     configured_pyannote = _at(config, "diarization", "model_dir")
+    pyannote = _config_path(configured_pyannote, base) if configured_pyannote else None
     if args.model_dir:
         # Wrapper/API contract: --model-dir is GigaSTT's exact model directory.
-        return (
-            Path(args.model_dir).expanduser().resolve(),
-            Path(configured_pyannote).expanduser().resolve()
-            if configured_pyannote
-            else None,
-        )
+        # It comes from the command line, so it is relative to the caller's cwd.
+        return Path(args.model_dir).expanduser().resolve(), pyannote
     giga = _at(config, "asr", "model_dir")
-    return (
-        Path(giga).expanduser().resolve() if giga else None,
-        Path(configured_pyannote).expanduser().resolve() if configured_pyannote else None,
-    )
+    return (_config_path(giga, base) if giga else None), pyannote
 
 
 def run_pipeline(args: argparse.Namespace) -> Path:
-    config, _ = _load_yaml(args.config)
+    config, config_path = _load_config(args.config)
     options = _resolved_run_options(args, config)
     source = Path(args.input).expanduser().resolve()
     if not source.is_file():
         raise PipelineError(f"Input audio does not exist: {source}")
     fingerprint = _fingerprint(source)
-    output_root_value = args.output_root or _at(
-        config, "project", "output_root", default="output"
-    )
-    output_root = Path(output_root_value).expanduser().resolve()
+    base = _project_root(config_path)
+    if args.output_root:
+        output_root = Path(args.output_root).expanduser().resolve()
+    else:
+        output_root = _config_path(
+            _at(config, "project", "output_root", default="output"), base
+        )
     safe_stem = re.sub(r"[^\w.-]+", "_", source.stem, flags=re.UNICODE).strip("._") or "audio"
     output_dir = output_root / f"{safe_stem}-{fingerprint['sha256'][:12]}"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -237,6 +329,10 @@ def run_pipeline(args: argparse.Namespace) -> Path:
         "pyannote_model": MODEL_ID,
         "pyannote_revision": MODEL_REVISION,
     }
+    # Thread counts change speed, never the transcript; keeping them out of the
+    # comparison means retuning them does not force a full rebuild.
+    for key in ("torch_threads", "torch_interop_threads"):
+        inference_config.pop(key, None)
     if previous and previous.get("config") != inference_config:
         raise PipelineError("Inference/merge options changed; use --force to rebuild.")
     manifest: dict[str, Any] = {
@@ -254,7 +350,7 @@ def run_pipeline(args: argparse.Namespace) -> Path:
         manifest["updated_at"] = _now()
         _atomic_json(manifest_path, manifest)
 
-    giga_model_dir, pyannote_cache_dir = _model_directories(args, config)
+    giga_model_dir, pyannote_cache_dir = _model_directories(args, config, base)
     print("[1/5] Preparing separate ASR and diarization audio…", flush=True)
     prepared = prepare_audio(
         source,
@@ -263,6 +359,8 @@ def run_pipeline(args: argparse.Namespace) -> Path:
         ffmpeg=args.ffmpeg,
         ffprobe=args.ffprobe,
         overwrite=args.force or previous is None,
+        asr_filter=options["asr_filter"],
+        diarization_filter=options["diarization_filter"],
     )
     mark(
         "audio",
@@ -370,11 +468,17 @@ def run_pipeline(args: argparse.Namespace) -> Path:
         },
     )
 
-    names = _speaker_names(args.speaker_map, args.speaker_name)
+    names = _speaker_names(args.speaker_map, args.speaker_name, known=merged["speakers"])
     formats = _formats(args.formats, config)
+    mark_uncertain = bool(_at(config, "output", "mark_uncertain_words", default=True))
     print("[5/5] Rendering " + ", ".join(formats) + "…", flush=True)
     paths = write_outputs(
-        merged, output_dir, stem=args.output_stem, formats=formats, names=names
+        merged,
+        output_dir,
+        stem=args.output_stem,
+        formats=formats,
+        names=names,
+        mark_uncertain=mark_uncertain,
     )
     mark(
         "render",
@@ -393,21 +497,21 @@ def _render_job(args: argparse.Namespace) -> Path:
     merged = _load_json(merged_path)
     manifest_path = job / "manifest.json"
     manifest = _load_json(manifest_path) if manifest_path.is_file() else {}
-    names = _speaker_names(args.speaker_map, args.speaker_name)
-    formats = (
-        [part.strip().lower() for part in args.formats.split(",") if part.strip()]
-        if args.formats
-        else [
-            Path(item).suffix.lstrip(".")
-            for item in manifest.get("stages", {}).get("render", {}).get("files", [])
-        ]
+    names = _speaker_names(
+        args.speaker_map, args.speaker_name, known=merged.get("speakers", [])
     )
-    formats = formats or ["md", "txt", "srt", "vtt", "json"]
-    invalid = set(formats) - {"md", "txt", "srt", "vtt", "json"}
-    if invalid:
-        raise PipelineError("Unsupported format(s): " + ", ".join(sorted(invalid)))
+    previous_formats = ",".join(
+        Path(item).suffix.lstrip(".")
+        for item in manifest.get("stages", {}).get("render", {}).get("files", [])
+    )
+    formats = _formats(args.formats or previous_formats or None, {})
     paths = write_outputs(
-        merged, job, stem=args.output_stem, formats=formats, names=names
+        merged,
+        job,
+        stem=args.output_stem,
+        formats=formats,
+        names=names,
+        mark_uncertain=args.mark_uncertain,
     )
     if manifest:
         manifest.setdefault("stages", {})["render"] = {
@@ -422,7 +526,7 @@ def _render_job(args: argparse.Namespace) -> Path:
 
 
 def _doctor(args: argparse.Namespace) -> int:
-    config, _ = _load_yaml(args.config)
+    config, _ = _load_config(args.config)
     # Validate the pin and relevant scalar configuration.
     probe_args = argparse.Namespace(
         num_speakers=None,
@@ -521,6 +625,12 @@ def build_parser() -> argparse.ArgumentParser:
     render.add_argument("--speaker-name", action="append", default=[], metavar="LABEL=NAME")
     render.add_argument("--formats")
     render.add_argument("--output-stem", default="transcript")
+    render.add_argument(
+        "--no-mark-uncertain",
+        dest="mark_uncertain",
+        action="store_false",
+        help="Do not mark turns whose speaker attribution is unconfirmed",
+    )
     return parser
 
 

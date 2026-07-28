@@ -148,6 +148,9 @@ def _convert(
         temporary.unlink(missing_ok=True)
 
 
+DEFAULT_ASR_FILTER = "highpass=f=80,loudnorm=I=-18:LRA=11:TP=-2"
+
+
 def prepare_audio(
     source: str | Path,
     work_dir: str | Path,
@@ -156,11 +159,15 @@ def prepare_audio(
     ffmpeg: str = "ffmpeg",
     ffprobe: str = "ffprobe",
     overwrite: bool = False,
+    asr_filter: str | None = DEFAULT_ASR_FILTER,
+    diarization_filter: str | None = None,
 ) -> PreparedAudio:
     """Create separate 16 kHz mono WAVs for ASR and diarization.
 
-    Diarization gets only resampling/downmixing. ASR additionally gets a gentle
-    high-pass and loudness normalization. Existing valid products are reused.
+    Diarization gets only resampling/downmixing by default. ASR additionally gets
+    a gentle high-pass and loudness normalization. Existing valid products are
+    reused. Both filters come from configuration so the audio actually used stays
+    inspectable rather than hidden in this module.
     """
 
     source_path = Path(source).resolve()
@@ -180,14 +187,9 @@ def prepare_audio(
         return product.channels == 1 and product.sample_rate == 16000
 
     if overwrite or not valid_product(diar_path):
-        _convert(source_path, diar_path, ffmpeg=ffmpeg, audio_filter=None)
+        _convert(source_path, diar_path, ffmpeg=ffmpeg, audio_filter=diarization_filter)
     if overwrite or not valid_product(asr_path):
-        _convert(
-            source_path,
-            asr_path,
-            ffmpeg=ffmpeg,
-            audio_filter="highpass=f=80,loudnorm=I=-18:LRA=11:TP=-2",
-        )
+        _convert(source_path, asr_path, ffmpeg=ffmpeg, audio_filter=asr_filter)
     return PreparedAudio(asr_path, diar_path, info)
 
 
