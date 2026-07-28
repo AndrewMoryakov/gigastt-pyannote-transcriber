@@ -95,19 +95,24 @@ DEFAULT_CUE_CHARS = 84
 def _turn_words(
     turn: Mapping[str, Any], words: Sequence[Mapping[str, Any]]
 ) -> list[Mapping[str, Any]]:
-    """Words belonging to a turn, using the index range merge recorded."""
+    """Words belonging to a turn, using the index range merge recorded.
+
+    Returns nothing unless the whole range is present. A partial match means the
+    JSON no longer matches its turns, and splitting on it would drop text from
+    the subtitle without saying so.
+    """
 
     if not words:
         return []
     first, last = turn.get("word_start"), turn.get("word_end")
     if first is None or last is None:
         return []
-    selected = [
-        word
-        for word in words
-        if first <= int(word.get("index", -1)) <= last
-        and str(word.get("speaker", turn["speaker"])) == str(turn["speaker"])
-    ]
+    selected = sorted(
+        (word for word in words if first <= int(word.get("index", -1)) <= last),
+        key=lambda word: int(word["index"]),
+    )
+    if len(selected) != int(last) - int(first) + 1:
+        return []
     return selected
 
 

@@ -325,3 +325,12 @@ def test_rerender_accepts_an_explicit_format_list(pipeline):
     assert (job / "итог.md").is_file()
     manifest = json.loads((job / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["stages"]["render"]["files"] == ["итог.md"]
+
+
+def test_a_non_numeric_subtitle_limit_is_a_pipeline_error(tmp_path):
+    config = write_config(
+        tmp_path / "c.yaml", "output:\n  subtitle_max_seconds: скоро\n"
+    )
+    loaded, _ = cli._load_config(config)
+    with pytest.raises(cli.PipelineError, match="subtitle_max_seconds"):
+        cli._subtitle_limits(loaded)

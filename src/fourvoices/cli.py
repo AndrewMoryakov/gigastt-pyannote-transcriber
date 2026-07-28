@@ -229,10 +229,18 @@ def _speaker_names(
 def _subtitle_limits(config: Mapping[str, Any]) -> dict[str, Any]:
     """Cue limits for SRT/VTT. Zero or negative disables that limit."""
 
-    seconds = float(
-        _at(config, "output", "subtitle_max_seconds", default=DEFAULT_CUE_SECONDS)
-    )
-    chars = int(_at(config, "output", "subtitle_max_chars", default=DEFAULT_CUE_CHARS))
+    try:
+        seconds = float(
+            _at(config, "output", "subtitle_max_seconds", default=DEFAULT_CUE_SECONDS)
+        )
+        chars = int(
+            _at(config, "output", "subtitle_max_chars", default=DEFAULT_CUE_CHARS)
+        )
+    except (TypeError, ValueError) as exc:
+        raise PipelineError(
+            "output.subtitle_max_seconds must be a number and "
+            f"output.subtitle_max_chars a whole number: {exc}"
+        ) from exc
     return {"max_cue_seconds": seconds, "max_cue_chars": chars}
 
 

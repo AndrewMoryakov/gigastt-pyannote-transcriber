@@ -191,3 +191,17 @@ def test_a_turn_without_word_timings_is_left_whole():
 def test_speaker_label_repeats_in_every_cue_of_a_turn():
     body = render_srt(LONG_TURN, names={"SPEAKER_00": "Отец"})
     assert body.count("Отец:") == len(_cue_times(body))
+
+
+def test_an_incomplete_word_range_leaves_the_turn_whole():
+    from fourvoices.render import split_turn
+
+    turn = LONG_TURN["turns"][0]
+    partial = [word for word in LONG_TURN["words"] if word["index"] != 7]
+
+    cues = split_turn(turn, partial)
+
+    # Splitting on a JSON whose words no longer match its turns would drop
+    # "слово7" from the subtitle without any sign that it happened.
+    assert len(cues) == 1
+    assert cues[0]["text"] == turn["text"]
