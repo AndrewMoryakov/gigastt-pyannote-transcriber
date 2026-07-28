@@ -8,7 +8,8 @@ param(
     [string]$SpeakerMap,
     [ValidateRange(1, 32)]
     [int]$NumSpeakers = 4,
-    [switch]$AllowDownmix
+    [switch]$AllowDownmix,
+    [switch]$StrictSpeakers
 )
 
 . (Join-Path $PSScriptRoot 'common.ps1')
@@ -50,6 +51,9 @@ foreach ($item in $InputAudio) {
     }
     if ($AllowDownmix) {
         $arguments += '--allow-downmix'
+    }
+    if ($StrictSpeakers) {
+        $arguments += '--strict-speakers'
     }
     Invoke-UvModule @arguments
 }

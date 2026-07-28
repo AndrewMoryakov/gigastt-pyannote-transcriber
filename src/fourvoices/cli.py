@@ -323,16 +323,29 @@ def run_pipeline(args: argparse.Namespace) -> Path:
         if any(old_input.get(key) != fingerprint[key] for key in ("name", "size_bytes", "sha256")):
             raise PipelineError("Existing job belongs to a different input; use --force.")
 
+    # Everything that can change the transcript. Thread counts are deliberately
+    # absent: they change speed, never the result, so retuning them must not
+    # force a rebuild.
     inference_config = {
-        **options,
-        "allow_downmix": bool(args.allow_downmix),
-        "pyannote_model": MODEL_ID,
-        "pyannote_revision": MODEL_REVISION,
+        key: options[key]
+        for key in (
+            "num_speakers",
+            "asr_filter",
+            "diarization_filter",
+            "model_variant",
+            "punctuation",
+            "itn",
+            "vad",
+            "device",
+            "max_turn_gap",
+            "nearest_max_gap",
+        )
     }
-    # Thread counts change speed, never the transcript; keeping them out of the
-    # comparison means retuning them does not force a full rebuild.
-    for key in ("torch_threads", "torch_interop_threads"):
-        inference_config.pop(key, None)
+    inference_config.update(
+        allow_downmix=bool(args.allow_downmix),
+        pyannote_model=MODEL_ID,
+        pyannote_revision=MODEL_REVISION,
+    )
     if previous and previous.get("config") != inference_config:
         raise PipelineError("Inference/merge options changed; use --force to rebuild.")
     manifest: dict[str, Any] = {

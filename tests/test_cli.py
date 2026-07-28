@@ -311,3 +311,17 @@ def test_a_stage_missing_from_the_manifest_is_recomputed(pipeline):
 
     assert calls.asr == 2
     assert calls.diarization == 1
+
+
+def test_rerender_accepts_an_explicit_format_list(pipeline):
+    _, source, config, _ = pipeline
+    job = run(source, config)
+
+    args = cli.build_parser().parse_args(
+        ["render", "--job-dir", str(job), "--formats", "md", "--output-stem", "итог"]
+    )
+    cli._render_job(args)
+
+    assert (job / "итог.md").is_file()
+    manifest = json.loads((job / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["stages"]["render"]["files"] == ["итог.md"]
