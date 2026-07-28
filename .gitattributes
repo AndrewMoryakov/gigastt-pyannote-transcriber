@@ -1,0 +1,15 @@
+* text=auto eol=lf
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.json text eol=lf
+*.md text eol=lf
+*.toml text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.m4a binary
+*.mp3 binary
+*.wav binary
+*.flac binary
+*.ogg binary
+*.opus binary

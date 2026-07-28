@@ -1,0 +1,48 @@
+project:
+  # Keep generated transcripts and intermediate WAV outside the Git checkout.
+  output_root: ../gigastt-pyannote-output
+  work_root: ../gigastt-pyannote-output/_work
+
+audio:
+  sample_rate: 16000
+  channels: 1
+  # Keep diarization audio close to the source: resample/downmix only.
+  diarization_filter: null
+  # Mild ASR-only cleanup. Do not use this copy for voice clustering.
+  asr_filter: "highpass=f=80,loudnorm=I=-18:LRA=11:TP=-2"
+  inspect_stereo_before_downmix: true
+
+asr:
+  engine: gigastt
+  model_variant: rnnt
+  model_dir: models/gigastt
+  punctuation: true
+  itn: true
+  word_timestamps: true
+  vad: true
+
+diarization:
+  engine: pyannote
+  model: pyannote/speaker-diarization-community-1
+  revision: 3533c8cf8e369892e6b79ff1bf80f7b0286a54ee
+  model_dir: models/pyannote
+  device: cpu
+  num_speakers: 4
+  use_exclusive_diarization: true
+
+merge:
+  strategy: maximum_overlap
+  max_turn_gap: 1.5
+  nearest_max_gap: 0.5
+  preserve_word_timestamps: true
+
+output:
+  formats:
+    - json
+    - md
+    - txt
+    - srt
+    - vtt
+  include_timestamps: true
+  timestamp_precision_ms: 10
+  mark_uncertain_words: true

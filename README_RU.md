@@ -1,0 +1,151 @@
+# Fourvoices: GigaSTT + pyannote для четырёх голосов
+
+Локальный CPU-конвейер для русскоязычных записей:
+
+1. **GigaSTT 2.15.0 / GigaAM v3 RNNT** распознаёт слова и их время.
+2. **pyannote Community-1** получает `num_speakers=4` и строит exclusive
+   diarization.
+3. `fourvoices` совмещает результаты по времени и сохраняет JSON, Markdown и
+   обычный текст.
+
+Исходное аудио, модели, токены и результаты намеренно исключены из Git.
+
+## Требования
+
+- Windows 10/11 x64 (инструкция рассчитана на Ryzen 9 7950X, CPU-only);
+- PowerShell 5.1 или 7;
+- около 10 ГБ свободного места на установку, модели и промежуточные WAV;
+- стабильный интернет для первой установки;
+- учётная запись Hugging Face и read-токен.
+
+Python 3.11 и виртуальная среда управляются через
+[uv](https://docs.astral.sh/uv/). PyTorch зафиксирован на CPU-сборке
+`2.11.0+cpu`; CUDA не требуется.
+
+## Однократный доступ к gated-модели Hugging Face
+
+До запуска скачивания:
+
+1. Войдите на Hugging Face.
+2. Откройте
+   <https://huggingface.co/pyannote/speaker-diarization-community-1>,
+   прочитайте и примите условия доступа.
+3. Создайте **Read** token на <https://huggingface.co/settings/tokens>.
+4. Не публикуйте токен, не вставляйте его в issue/commit/log.
+
+Ревизия модели зафиксирована:
+`3533c8cf8e369892e6b79ff1bf80f7b0286a54ee`.
+
+## Быстрый старт на чистой Windows / Ryzen 9
+
+```powershell
+git clone <URL_РЕПОЗИТОРИЯ> gigastt-pyannote-transcriber
+Set-Location .\gigastt-pyannote-transcriber
+Set-ExecutionPolicy -Scope Process Bypass
+
+# uv, Python 3.11, .venv и CPU-зависимости; при необходимости также ffmpeg:
+.\scripts\install.ps1 -InstallFfmpeg
+
+# Токен живёт только в текущем PowerShell и не записывается на диск:
+$secureToken = Read-Host 'HF read token' -AsSecureString
+$env:HF_TOKEN = [Net.NetworkCredential]::new('', $secureToken).Password
+```
+
+Если ffmpeg был установлен через winget и ещё не виден в `PATH`, откройте
+новое окно PowerShell, вернитесь в каталог репозитория и снова задайте токен
+командами выше. Затем выполните:
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\scripts\download-models.ps1
+.\scripts\doctor.ps1
+Remove-Item Env:HF_TOKEN
+```
+
+`download-models.ps1` скачивает строго GigaSTT **v2.15.0** для Windows x64,
+проверяет архив по SHA-256 из `tools/tools.lock.json`, затем получает RNNT INT8,
+VAD, пунктуацию и точную ревизию pyannote. Непроверенный `gigastt.exe` не
+запускается.
+
+Положите записи в игнорируемый каталог `media`:
+
+```powershell
+Copy-Item 'D:\Аудио\беседа-1.m4a' .\media\
+Copy-Item 'D:\Аудио\беседа-2.m4a' .\media\
+
+.\scripts\run.ps1 -InputAudio @(
+    '.\media\беседа-1.m4a',
+    '.\media\беседа-2.m4a'
+)
+```
+
+Файлы обрабатываются **строго последовательно**, чтобы два тяжёлых CPU-задания
+не конкурировали за память. Результаты по умолчанию появятся в соседнем с
+репозиторием каталоге `gigastt-pyannote-output\`, то есть не смогут случайно
+попасть в commit. Скрипт получает ровно четыре кластера говорящих, но имена
+людей автоматически не угадывает.
+
+Если запись стереофоническая, программа сначала остановится, не смешивая
+каналы молча. Прослушайте левый и правый каналы отдельно. Если полезного
+пространственного разделения нет, повторите команду с `-AllowDownmix`.
+
+## Назначение говорящих вручную
+
+После первого прохода прослушайте несколько длинных реплик каждого кластера.
+Скопируйте карту и замените подписи:
+
+```powershell
+Copy-Item .\config\speaker-map.example.yaml `
+    ..\gigastt-pyannote-output\<имя-задания>\speaker-map.yaml
+notepad ..\gigastt-pyannote-output\<имя-задания>\speaker-map.yaml
+
+.\scripts\rerender.ps1 `
+    -JobDir ..\gigastt-pyannote-output\<имя-задания> `
+    -SpeakerMap ..\gigastt-pyannote-output\<имя-задания>\speaker-map.yaml
+```
+
+Не назначайте имя по короткому «да/угу»: для проверки используйте длинные,
+хорошо слышимые фрагменты. Перебивания и одновременная речь требуют ручной
+вычитки независимо от модели.
+
+## Как обрабатывается звук
+
+- Для pyannote создаётся почти исходная версия: mono, 16 кГц, без агрессивного
+  шумоподавления.
+- Для ASR создаётся отдельная версия с мягким high-pass 80 Гц и loudnorm.
+- Стерео сначала следует прослушать по каналам: иногда левый/правый канал уже
+  разделяет собеседников. Автоматическое downmix до такой проверки нежелательно.
+- Оригинал не изменяется.
+
+Базовые настройки находятся в `config/default.yaml`.
+
+## Полезные команды
+
+```powershell
+# Проверка среды, токена, моделей и CPU PyTorch
+.\scripts\doctor.ps1
+
+# Тесты плюс защита от случайного добавления аудио/токенов
+.\scripts\test.ps1
+
+# Только повторное скачивание/проверка GigaSTT
+.\scripts\download-models.ps1 -SkipPyannote -Force
+
+# Только gated-модель pyannote
+.\scripts\download-models.ps1 -SkipGigaStt
+```
+
+## Безопасность и воспроизводимость
+
+- Никогда не используйте `git add -f` для аудио, `.env`, `models\` или
+  `transcripts\`.
+- Перед commit запускайте `.\scripts\check-repo-hygiene.ps1`.
+- Рекомендуется задавать `HF_TOKEN` только для текущего процесса PowerShell.
+  Локальный `.env` поддерживается как запасной вариант и игнорируется Git.
+- GigaSTT зафиксирован URL + SHA-256, pyannote — полным git revision.
+- Первое скачивание требует сети; сама обработка после подготовки моделей
+  выполняется локально.
+
+Автоматическая транскрипция не является дословной гарантией. Для юридически
+значимых цитат обязательно сохраняйте оригинал, таймкод и вручную сверяйте
+слова на слух.

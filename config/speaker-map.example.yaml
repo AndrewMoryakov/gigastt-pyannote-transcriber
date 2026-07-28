@@ -1,0 +1,6 @@
+# Copy next to a completed job (or to another ignored/local path), listen to
+# representative fragments, and replace labels only after manual verification.
+SPEAKER_00: "Говорящий 1"
+SPEAKER_01: "Говорящий 2"
+SPEAKER_02: "Говорящий 3"
+SPEAKER_03: "Говорящий 4"

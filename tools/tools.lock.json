@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "gigastt": {
+    "version": "2.15.0",
+    "platform": "windows-x86_64-msvc",
+    "asset": "gigastt-2.15.0-x86_64-pc-windows-msvc.tar.gz",
+    "url": "https://github.com/ekhodzitsky/gigastt/releases/download/v2.15.0/gigastt-2.15.0-x86_64-pc-windows-msvc.tar.gz",
+    "sha256": "fc731908cf010dc6e5ae4088d0a76a1f8624f8544fa4a830b5a4e64b233dba78"
+  },
+  "pyannote": {
+    "model": "pyannote/speaker-diarization-community-1",
+    "revision": "3533c8cf8e369892e6b79ff1bf80f7b0286a54ee"
+  }
+}

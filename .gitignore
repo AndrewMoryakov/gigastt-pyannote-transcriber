@@ -1,0 +1,38 @@
+# Python / uv
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local settings and secrets
+.env
+.env.*
+!.env.example
+secrets/
+
+# Models, native tools and generated data
+models/
+tools/bin/
+tools/downloads/
+media/
+transcripts/
+
+# Audio must never be committed, regardless of its location.
+*.aac
+*.flac
+*.m4a
+*.mp3
+*.ogg
+*.opus
+*.wav
+*.wma
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+Thumbs.db
+Desktop.ini
