@@ -2,7 +2,6 @@ import json
 
 from fourvoices.render import clock, render_json, render_md, render_srt, render_txt, render_vtt
 
-
 DATA = {
     "duration_s": 62.5,
     "speakers": ["SPEAKER_00", "SPEAKER_01"],
@@ -160,7 +159,7 @@ def test_cues_stay_inside_the_turn_and_never_go_backwards():
     cues = split_turn(turn, LONG_TURN["words"])
     assert cues[0]["start"] >= turn["start"]
     assert cues[-1]["end"] <= turn["end"]
-    for earlier, later in zip(cues, cues[1:]):
+    for earlier, later in zip(cues, cues[1:], strict=False):
         assert earlier["end"] <= later["start"]
 
 

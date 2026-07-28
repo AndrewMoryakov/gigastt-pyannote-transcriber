@@ -10,9 +10,10 @@ import os
 import re
 import shutil
 import sys
-from datetime import datetime, timezone
+from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 import yaml
 
@@ -87,7 +88,7 @@ def validate_config(config: Mapping[str, Any]) -> None:
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 def _fingerprint(path: Path) -> dict[str, Any]:
@@ -201,7 +202,9 @@ def _speaker_names(
     names: dict[str, str] = {}
     if speaker_map:
         value, _ = _load_yaml(speaker_map)
-        if not all(isinstance(key, str) and isinstance(name, str) for key, name in value.items()):
+        if not all(
+            isinstance(key, str) and isinstance(name, str) for key, name in value.items()
+        ):
             raise PipelineError("Speaker map must contain LABEL: NAME string pairs.")
         names.update(value)
     for item in inline:
@@ -249,7 +252,9 @@ def _formats(argument: str | None, config: Mapping[str, Any]) -> list[str]:
     values = argument.split(",") if argument else configured
     if not isinstance(values, list):
         raise PipelineError("output.formats must be a YAML list.")
-    result = [str(value).strip().lower().lstrip(".") for value in values if str(value).strip()]
+    result = [
+        str(value).strip().lower().lstrip(".") for value in values if str(value).strip()
+    ]
     invalid = sorted(set(result) - {"md", "txt", "srt", "vtt", "json"})
     if invalid:
         raise PipelineError("Unsupported format(s): " + ", ".join(invalid))
@@ -258,7 +263,9 @@ def _formats(argument: str | None, config: Mapping[str, Any]) -> list[str]:
     return result
 
 
-def _resolved_run_options(args: argparse.Namespace, config: Mapping[str, Any]) -> dict[str, Any]:
+def _resolved_run_options(
+    args: argparse.Namespace, config: Mapping[str, Any]
+) -> dict[str, Any]:
     model = str(_at(config, "diarization", "model", default=MODEL_ID))
     revision = str(_at(config, "diarization", "revision", default=MODEL_REVISION))
     if model != MODEL_ID or revision != MODEL_REVISION:
@@ -345,7 +352,8 @@ def run_pipeline(args: argparse.Namespace) -> Path:
     if manifest_path.is_file() and not args.force:
         previous = _load_json(manifest_path)
         old_input = previous.get("input", {})
-        if any(old_input.get(key) != fingerprint[key] for key in ("name", "size_bytes", "sha256")):
+        identity = ("name", "size_bytes", "sha256")
+        if any(old_input.get(key) != fingerprint[key] for key in identity):
             raise PipelineError("Existing job belongs to a different input; use --force.")
 
     # Everything that can change the transcript. Thread counts are deliberately

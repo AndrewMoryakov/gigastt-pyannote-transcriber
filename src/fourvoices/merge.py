@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import re
 from bisect import bisect_left
 from collections import defaultdict
+from collections.abc import Iterable, Mapping, Sequence
 from difflib import SequenceMatcher
-import re
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any
 
 # Timestamps are seconds with millisecond-scale meaning; treat anything closer
 # than this as equal so float noise cannot invent or hide a tie.
@@ -182,7 +183,9 @@ def speaker_assignment(
 
     candidates = index.nearest_candidates(start, effective_end)
     if candidates:
-        nearest = min(candidates, key=lambda segment: (gap(segment), str(segment["speaker"])))
+        nearest = min(
+            candidates, key=lambda segment: (gap(segment), str(segment["speaker"]))
+        )
         nearest_gap = gap(nearest)
         if nearest_gap <= nearest_max_gap:
             tied = {
@@ -346,9 +349,11 @@ def _confidence(words: Sequence[Mapping[str, Any]]) -> float | None:
         return None
     weights = [max(0.0, float(w["end"]) - float(w["start"])) for w in words]
     if sum(weights) > 0:
-        return sum(float(w.get("confidence", 0.0)) * n for w, n in zip(words, weights)) / sum(
-            weights
+        weighted = sum(
+            float(word.get("confidence", 0.0)) * weight
+            for word, weight in zip(words, weights, strict=True)
         )
+        return weighted / sum(weights)
     return sum(float(w.get("confidence", 0.0)) for w in words) / len(words)
 
 

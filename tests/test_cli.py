@@ -47,7 +47,9 @@ def test_relative_paths_follow_the_project_root_not_the_cwd(tmp_path, monkeypatc
     project = tmp_path / "project"
     (project / "config").mkdir(parents=True)
     (project / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
-    config = write_config(project / "config" / "default.yaml", "asr:\n  model_dir: models/gigastt\n")
+    config = write_config(
+        project / "config" / "default.yaml", "asr:\n  model_dir: models/gigastt\n"
+    )
 
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
@@ -57,7 +59,8 @@ def test_relative_paths_follow_the_project_root_not_the_cwd(tmp_path, monkeypatc
     base = cli._project_root(config_path)
 
     assert base == project.resolve()
-    assert cli._config_path("models/gigastt", base) == (project / "models" / "gigastt").resolve()
+    expected = (project / "models" / "gigastt").resolve()
+    assert cli._config_path("models/gigastt", base) == expected
     assert cli._config_path("../out", base) == (tmp_path / "out").resolve()
 
 

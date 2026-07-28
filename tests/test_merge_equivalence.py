@@ -10,10 +10,10 @@ import random
 import pytest
 
 from fourvoices.merge import (
-    interval_overlap,
-    has_regular_overlap,
-    speaker_assignment,
     UNKNOWN_SPEAKER,
+    has_regular_overlap,
+    interval_overlap,
+    speaker_assignment,
 )
 
 

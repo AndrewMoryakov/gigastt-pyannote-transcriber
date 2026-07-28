@@ -13,6 +13,7 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --locked --python 3.11
+      - run: uv run ruff check src tests
       - run: uv run pytest -q
       - shell: pwsh
         run: ./scripts/check-repo-hygiene.ps1

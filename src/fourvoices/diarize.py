@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sys
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 # Evidence processing is local by design. Set these before importing HF/pyannote.
 os.environ.setdefault("PYANNOTE_METRICS_ENABLED", "0")
@@ -110,11 +112,9 @@ def diarize(
     if torch_threads < 1 or torch_interop_threads < 1:
         raise ValueError("PyTorch thread counts must be positive")
     torch.set_num_threads(torch_threads)
-    try:
-        torch.set_num_interop_threads(torch_interop_threads)
-    except RuntimeError:
+    with contextlib.suppress(RuntimeError):
         # PyTorch permits setting this only before its first parallel operation.
-        pass
+        torch.set_num_interop_threads(torch_interop_threads)
     waveform, sample_rate, duration = _load_waveform(source)
     try:
         pipeline = Pipeline.from_pretrained(
