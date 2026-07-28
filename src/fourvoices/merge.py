@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+from bisect import bisect_left
 from collections import defaultdict
 from difflib import SequenceMatcher
 import re
 from typing import Any, Iterable, Mapping, Sequence
+
+# Timestamps are seconds with millisecond-scale meaning; treat anything closer
+# than this as equal so float noise cannot invent or hide a tie.
+EPSILON = 1e-9
 
 UNKNOWN_SPEAKER = "UNKNOWN"
 
@@ -44,10 +49,80 @@ def _validate_segments(items: Iterable[Mapping[str, Any]]) -> list[dict[str, Any
     return sorted(segments, key=lambda x: (x["start"], x["end"], x["speaker"]))
 
 
+class ExclusiveIndex:
+    """Exclusive segments prepared for repeated interval queries.
+
+    Scanning every segment per word made merging quadratic in recording length.
+    Segments are sorted by start, so a binary search bounds the candidates; the
+    running maximum of the ends tells the backward scan when to stop, which is
+    what keeps the bound valid even if two segments happen to overlap.
+    """
+
+    __slots__ = ("segments", "_starts", "_max_end")
+
+    def __init__(self, segments: Sequence[Mapping[str, Any]]) -> None:
+        self.segments = _validate_segments(segments)
+        self._starts = [segment["start"] for segment in self.segments]
+        self._max_end: list[float] = []
+        running = float("-inf")
+        for segment in self.segments:
+            running = max(running, segment["end"])
+            self._max_end.append(running)
+
+    def __len__(self) -> int:
+        return len(self.segments)
+
+    def overlapping(self, start: float, end: float) -> list[dict[str, Any]]:
+        """Segments sharing a positive-length interval with ``[start, end]``."""
+
+        found: list[dict[str, Any]] = []
+        index = bisect_left(self._starts, end) - 1
+        while index >= 0 and self._max_end[index] > start:
+            segment = self.segments[index]
+            if segment["end"] > start and segment["start"] < end:
+                found.append(segment)
+            index -= 1
+        return found
+
+    def nearest_candidates(self, start: float, end: float) -> list[dict[str, Any]]:
+        """Segments that could be closest to a word lying in a diarization gap.
+
+        Only called when nothing overlaps, so every segment sits wholly before or
+        wholly after the word: the best on each side is the one ending latest
+        before it or starting earliest after it, plus anything tied with it.
+        """
+
+        if not self.segments:
+            return []
+        candidates: list[dict[str, Any]] = []
+        split = bisect_left(self._starts, end)
+        if split > 0:
+            best_end = self._max_end[split - 1]
+            index = split - 1
+            while index >= 0 and self._max_end[index] >= best_end - EPSILON:
+                if self.segments[index]["end"] >= best_end - EPSILON:
+                    candidates.append(self.segments[index])
+                index -= 1
+        if split < len(self.segments):
+            best_start = self._starts[split]
+            index = split
+            while (
+                index < len(self.segments)
+                and self._starts[index] <= best_start + EPSILON
+            ):
+                candidates.append(self.segments[index])
+                index += 1
+        return candidates
+
+
+def _as_exclusive_index(value: Sequence[Mapping[str, Any]] | ExclusiveIndex) -> ExclusiveIndex:
+    return value if isinstance(value, ExclusiveIndex) else ExclusiveIndex(value)
+
+
 def assign_speaker(
     start: float,
     end: float,
-    exclusive_segments: Sequence[Mapping[str, Any]],
+    exclusive_segments: Sequence[Mapping[str, Any]] | ExclusiveIndex,
     *,
     nearest_max_gap: float = 0.5,
 ) -> tuple[str, float]:
@@ -68,7 +143,7 @@ def assign_speaker(
 def speaker_assignment(
     start: float,
     end: float,
-    exclusive_segments: Sequence[Mapping[str, Any]],
+    exclusive_segments: Sequence[Mapping[str, Any]] | ExclusiveIndex,
     *,
     nearest_max_gap: float = 0.5,
 ) -> dict[str, Any]:
@@ -78,30 +153,24 @@ def speaker_assignment(
         raise ValueError("word end precedes start")
     if nearest_max_gap < 0:
         raise ValueError("nearest_max_gap must not be negative")
+    index = _as_exclusive_index(exclusive_segments)
     effective_end = end if end > start else start + 0.001
     totals: dict[str, float] = defaultdict(float)
-    for segment in exclusive_segments:
+    for segment in index.overlapping(start, effective_end):
         overlap = interval_overlap(
-            start, effective_end, float(segment["start"]), float(segment["end"])
+            start, effective_end, segment["start"], segment["end"]
         )
         if overlap:
             totals[str(segment["speaker"])] += overlap
     if totals:
         ranked = sorted(totals.items(), key=lambda pair: (-pair[1], pair[0]))
         speaker, overlap = ranked[0]
-        ambiguous = len(ranked) > 1 and abs(ranked[1][1] - overlap) <= 1e-9
+        ambiguous = len(ranked) > 1 and abs(ranked[1][1] - overlap) <= EPSILON
         return {
             "speaker": speaker,
             "overlap_s": overlap,
             "assignment": "overlap",
             "ambiguous": ambiguous,
-        }
-    if not exclusive_segments:
-        return {
-            "speaker": UNKNOWN_SPEAKER,
-            "overlap_s": 0.0,
-            "assignment": "unknown",
-            "ambiguous": False,
         }
 
     def gap(segment: Mapping[str, Any]) -> float:
@@ -111,26 +180,22 @@ def speaker_assignment(
             0.0,
         )
 
-    nearest = min(
-        exclusive_segments,
-        key=lambda segment: (
-            gap(segment),
-            str(segment["speaker"]),
-        ),
-    )
-    nearest_gap = gap(nearest)
-    if nearest_gap <= nearest_max_gap:
-        tied = {
-            str(segment["speaker"])
-            for segment in exclusive_segments
-            if abs(gap(segment) - nearest_gap) <= 1e-9
-        }
-        return {
-            "speaker": str(nearest["speaker"]),
-            "overlap_s": 0.0,
-            "assignment": "nearest",
-            "ambiguous": len(tied) > 1,
-        }
+    candidates = index.nearest_candidates(start, effective_end)
+    if candidates:
+        nearest = min(candidates, key=lambda segment: (gap(segment), str(segment["speaker"])))
+        nearest_gap = gap(nearest)
+        if nearest_gap <= nearest_max_gap:
+            tied = {
+                str(segment["speaker"])
+                for segment in candidates
+                if abs(gap(segment) - nearest_gap) <= EPSILON
+            }
+            return {
+                "speaker": str(nearest["speaker"]),
+                "overlap_s": 0.0,
+                "assignment": "nearest",
+                "ambiguous": len(tied) > 1,
+            }
     return {
         "speaker": UNKNOWN_SPEAKER,
         "overlap_s": 0.0,
@@ -139,25 +204,89 @@ def speaker_assignment(
     }
 
 
+class OverlapIndex:
+    """Times where two or more different regular tracks speak at once.
+
+    The answer does not depend on the query, so it is computed once with a
+    boundary sweep instead of re-scanning every segment pair per word.
+    """
+
+    __slots__ = ("intervals", "_starts")
+
+    def __init__(self, regular_segments: Sequence[Mapping[str, Any]]) -> None:
+        self.intervals = _simultaneous_intervals(regular_segments)
+        self._starts = [interval[0] for interval in self.intervals]
+
+    def covers(self, start: float, end: float) -> bool:
+        """Whether ``[start, end]`` shares positive length with any such time."""
+
+        position = bisect_left(self._starts, end)
+        for index in range(position - 1, -1, -1):
+            interval_start, interval_end = self.intervals[index]
+            if interval_end <= start:
+                # Intervals are disjoint and sorted, so everything earlier ends
+                # even sooner.
+                break
+            if min(end, interval_end) - max(start, interval_start) > 0:
+                return True
+        return False
+
+
+def _simultaneous_intervals(
+    regular_segments: Sequence[Mapping[str, Any]],
+) -> list[tuple[float, float]]:
+    events: list[tuple[float, int, str]] = []
+    for segment in regular_segments:
+        start, end = float(segment["start"]), float(segment["end"])
+        if end > start:
+            speaker = str(segment["speaker"])
+            events.append((start, 1, speaker))
+            events.append((end, -1, speaker))
+    if not events:
+        return []
+    # Close before opening at the same instant: touching segments are adjacent,
+    # not simultaneous.
+    events.sort(key=lambda event: (event[0], event[1]))
+    active: dict[str, int] = defaultdict(int)
+    distinct = 0
+    intervals: list[tuple[float, float]] = []
+    position = 0
+    total = len(events)
+    while position < total:
+        time = events[position][0]
+        while position < total and events[position][0] == time:
+            _, delta, speaker = events[position]
+            active[speaker] += delta
+            if delta > 0 and active[speaker] == 1:
+                distinct += 1
+            elif delta < 0 and active[speaker] == 0:
+                distinct -= 1
+            position += 1
+        # The active set stays constant until the next boundary.
+        if distinct >= 2 and position < total and events[position][0] > time:
+            intervals.append((time, events[position][0]))
+    merged: list[tuple[float, float]] = []
+    for interval in intervals:
+        if merged and interval[0] <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], interval[1]))
+        else:
+            merged.append(interval)
+    return merged
+
+
 def has_regular_overlap(
-    start: float, end: float, regular_segments: Sequence[Mapping[str, Any]]
+    start: float,
+    end: float,
+    regular_segments: Sequence[Mapping[str, Any]] | OverlapIndex,
 ) -> bool:
     """Whether two different regular diarization tracks overlap in this interval."""
 
-    relevant = [
-        segment
-        for segment in regular_segments
-        if interval_overlap(start, end, float(segment["start"]), float(segment["end"])) > 0
-    ]
-    for index, left in enumerate(relevant):
-        for right in relevant[index + 1 :]:
-            if str(left["speaker"]) == str(right["speaker"]):
-                continue
-            shared_start = max(start, float(left["start"]), float(right["start"]))
-            shared_end = min(end, float(left["end"]), float(right["end"]))
-            if shared_end > shared_start:
-                return True
-    return False
+    index = (
+        regular_segments
+        if isinstance(regular_segments, OverlapIndex)
+        else OverlapIndex(regular_segments)
+    )
+    return index.covers(start, end)
 
 
 _NO_SPACE_BEFORE = frozenset(",.!?:;%)]}»")
@@ -269,8 +398,8 @@ def merge_transcript(
 ) -> dict[str, Any]:
     """Return an evidence-friendly merged representation."""
 
-    exclusive = _validate_segments(diarization.get("exclusive_segments", []))
-    regular = _validate_segments(diarization.get("segments", []))
+    exclusive = ExclusiveIndex(diarization.get("exclusive_segments", []))
+    regular = OverlapIndex(_validate_segments(diarization.get("segments", [])))
     source_words = list(transcript.get("words", []))
     display_words, punctuation_alignment_ratio = align_processed_text(
         source_words, str(transcript.get("text", ""))
