@@ -337,3 +337,17 @@ def test_a_non_numeric_subtitle_limit_is_a_pipeline_error(tmp_path):
     loaded, _ = cli._load_config(config)
     with pytest.raises(cli.PipelineError, match="subtitle_max_seconds"):
         cli._subtitle_limits(loaded)
+
+
+def test_thread_default_follows_the_machine_not_a_hardcoded_number():
+    import os
+
+    args = cli.build_parser().parse_args(["run", "--input", "x"])
+    assert args.torch_threads == (os.cpu_count() or 1)
+    assert args.torch_threads >= 1
+    assert args.torch_interop_threads == 1
+
+
+def test_an_explicit_thread_count_still_wins():
+    args = cli.build_parser().parse_args(["run", "--input", "x", "--torch-threads", "4"])
+    assert args.torch_threads == 4

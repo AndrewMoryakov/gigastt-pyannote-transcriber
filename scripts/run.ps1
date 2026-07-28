@@ -11,11 +11,12 @@ param(
     [switch]$AllowDownmix,
     [switch]$StrictSpeakers,
 
-    # Defaults suit a 16-core CPU; set to your own physical core count.
-    [ValidateRange(1, 256)]
-    [int]$TorchThreads = 16,
-    [ValidateRange(1, 256)]
-    [int]$TorchInteropThreads = 1
+    # 0 means "let fourvoices decide" (logical processor count). Set an explicit
+    # value to pin it, e.g. your physical core count on an SMT CPU.
+    [ValidateRange(0, 256)]
+    [int]$TorchThreads = 0,
+    [ValidateRange(0, 256)]
+    [int]$TorchInteropThreads = 0
 )
 
 . (Join-Path $PSScriptRoot 'common.ps1')
@@ -50,10 +51,14 @@ foreach ($item in $InputAudio) {
         '--config', (Resolve-RepoPath -Path $Config),
         '--gigastt-exe', $exe,
         '--model-dir', $gigaModelDir,
-        '--num-speakers', $NumSpeakers.ToString(),
-        '--torch-threads', $TorchThreads.ToString(),
-        '--torch-interop-threads', $TorchInteropThreads.ToString()
+        '--num-speakers', $NumSpeakers.ToString()
     )
+    if ($TorchThreads -gt 0) {
+        $arguments += @('--torch-threads', $TorchThreads.ToString())
+    }
+    if ($TorchInteropThreads -gt 0) {
+        $arguments += @('--torch-interop-threads', $TorchInteropThreads.ToString())
+    }
     if ($SpeakerMap) {
         $arguments += @('--speaker-map', (Resolve-RepoPath -Path $SpeakerMap))
     }

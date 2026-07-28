@@ -20,6 +20,11 @@ MODEL_ID = "pyannote/speaker-diarization-community-1"
 MODEL_REVISION = "3533c8cf8e369892e6b79ff1bf80f7b0286a54ee"
 DEFAULT_NUM_SPEAKERS = 4
 
+# Intra-op threads. os.cpu_count() reports LOGICAL processors, so on an SMT CPU
+# this is twice the physical core count; pass an explicit value to override.
+DEFAULT_TORCH_THREADS = os.cpu_count() or 1
+DEFAULT_TORCH_INTEROP_THREADS = 1
+
 
 class DiarizationError(RuntimeError):
     """Diarization failed or produced an unusable annotation."""
@@ -78,8 +83,8 @@ def diarize(
     token: str | None = None,
     device: str = "cpu",
     cache_dir: str | Path | None = None,
-    torch_threads: int = 16,
-    torch_interop_threads: int = 1,
+    torch_threads: int = DEFAULT_TORCH_THREADS,
+    torch_interop_threads: int = DEFAULT_TORCH_INTEROP_THREADS,
     strict_speakers: bool = False,
 ) -> dict[str, Any]:
     """Run the revision-pinned pipeline and save regular + exclusive annotations.

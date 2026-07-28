@@ -21,6 +21,8 @@ from . import __version__
 from .audio import DEFAULT_ASR_FILTER, AudioPreparationError, prepare_audio
 from .diarize import (
     DEFAULT_NUM_SPEAKERS,
+    DEFAULT_TORCH_INTEROP_THREADS,
+    DEFAULT_TORCH_THREADS,
     MODEL_ID,
     MODEL_REVISION,
     DiarizationError,
@@ -599,8 +601,8 @@ def _doctor(args: argparse.Namespace) -> int:
         itn=None,
         no_vad=False,
         device=None,
-        torch_threads=16,
-        torch_interop_threads=1,
+        torch_threads=DEFAULT_TORCH_THREADS,
+        torch_interop_threads=DEFAULT_TORCH_INTEROP_THREADS,
     )
     _resolved_run_options(probe_args, config)
     checks: list[tuple[str, bool, str]] = []
@@ -663,8 +665,15 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--itn", choices=("auto", "on", "off"))
     run.add_argument("--no-vad", action="store_true")
     run.add_argument("--encoder-threads", type=int)
-    run.add_argument("--torch-threads", type=int, default=16)
-    run.add_argument("--torch-interop-threads", type=int, default=1)
+    run.add_argument(
+        "--torch-threads",
+        type=int,
+        default=DEFAULT_TORCH_THREADS,
+        help="Intra-op threads; defaults to the logical processor count",
+    )
+    run.add_argument(
+        "--torch-interop-threads", type=int, default=DEFAULT_TORCH_INTEROP_THREADS
+    )
     run.add_argument("--device")
     run.add_argument("--max-turn-gap", type=float)
     run.add_argument("--nearest-max-gap", type=float)

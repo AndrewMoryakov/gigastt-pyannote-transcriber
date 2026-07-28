@@ -288,18 +288,22 @@ minutes, and without splitting the subtitles are unreadable.
 
 ### Threads
 
-`-TorchThreads 16` targets a 16-core Ryzen 9 7950X — every core on intra-op
-work. On another CPU, pass your own physical core count; this is the only
-performance knob worth touching.
+`-TorchThreads` defaults to the machine's logical processor count
+(`os.cpu_count()`), so the repository behaves sensibly on any CPU without being
+edited. Beware that this counts **logical** processors: on an SMT part such as
+a Ryzen 9 7950X that is 32, not the 16 physical cores. Memory-bandwidth-bound
+decoding often gains nothing from SMT and can lose to it, so if you want the
+physical count, pass it: `-TorchThreads 16`.
 
-`-TorchInteropThreads 1` limits inter-op parallelism so that threads do not
-compete for the same cores. Note that PyTorch accepts this setting only before
-its first parallel operation, so it is applied on a best-effort basis and may
-silently have no effect. Correctness is unaffected either way.
+`-TorchInteropThreads` defaults to 1, limiting inter-op parallelism so that
+threads do not compete for the same cores. Note that PyTorch accepts this
+setting only before its first parallel operation, so it is applied on a
+best-effort basis and may silently have no effect. Correctness is unaffected
+either way.
 
 Neither option appears in the configuration file on purpose: they do not change
 the result, they live on the command line only, and they never trigger a
-rebuild.
+rebuild. In `run.ps1` a value of `0` means "let fourvoices decide".
 
 ## What gets marked in the transcript
 
