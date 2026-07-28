@@ -29,7 +29,7 @@ from .diarize import (
 )
 from .gigastt import GigaSTTError, load_transcript, transcribe
 from .merge import merge_transcript
-from .render import write_outputs
+from .render import DEFAULT_CUE_CHARS, DEFAULT_CUE_SECONDS, write_outputs
 
 
 class PipelineError(RuntimeError):
@@ -46,7 +46,14 @@ CONFIG_SCHEMA: dict[str, frozenset[str]] = {
         {"model", "revision", "model_dir", "device", "num_speakers"}
     ),
     "merge": frozenset({"max_turn_gap", "nearest_max_gap"}),
-    "output": frozenset({"formats", "mark_uncertain_words"}),
+    "output": frozenset(
+        {
+            "formats",
+            "mark_uncertain_words",
+            "subtitle_max_seconds",
+            "subtitle_max_chars",
+        }
+    ),
 }
 
 
@@ -217,6 +224,16 @@ def _speaker_names(
                 flush=True,
             )
     return names
+
+
+def _subtitle_limits(config: Mapping[str, Any]) -> dict[str, Any]:
+    """Cue limits for SRT/VTT. Zero or negative disables that limit."""
+
+    seconds = float(
+        _at(config, "output", "subtitle_max_seconds", default=DEFAULT_CUE_SECONDS)
+    )
+    chars = int(_at(config, "output", "subtitle_max_chars", default=DEFAULT_CUE_CHARS))
+    return {"max_cue_seconds": seconds, "max_cue_chars": chars}
 
 
 def _formats(argument: str | None, config: Mapping[str, Any]) -> list[str]:
@@ -496,6 +513,7 @@ def run_pipeline(args: argparse.Namespace) -> Path:
     names = _speaker_names(args.speaker_map, args.speaker_name, known=merged["speakers"])
     formats = _formats(args.formats, config)
     mark_uncertain = bool(_at(config, "output", "mark_uncertain_words", default=True))
+    subtitles = _subtitle_limits(config)
     print("[5/5] Rendering " + ", ".join(formats) + "…", flush=True)
     paths = write_outputs(
         merged,
@@ -504,6 +522,7 @@ def run_pipeline(args: argparse.Namespace) -> Path:
         formats=formats,
         names=names,
         mark_uncertain=mark_uncertain,
+        **subtitles,
     )
     mark(
         "render",
@@ -537,6 +556,8 @@ def _render_job(args: argparse.Namespace) -> Path:
         formats=formats,
         names=names,
         mark_uncertain=args.mark_uncertain,
+        max_cue_seconds=args.subtitle_max_seconds,
+        max_cue_chars=args.subtitle_max_chars,
     )
     if manifest:
         manifest.setdefault("stages", {})["render"] = {
@@ -650,6 +671,18 @@ def build_parser() -> argparse.ArgumentParser:
     render.add_argument("--speaker-name", action="append", default=[], metavar="LABEL=NAME")
     render.add_argument("--formats")
     render.add_argument("--output-stem", default="transcript")
+    render.add_argument(
+        "--subtitle-max-seconds",
+        type=float,
+        default=DEFAULT_CUE_SECONDS,
+        help="Longest subtitle cue; 0 disables splitting by time",
+    )
+    render.add_argument(
+        "--subtitle-max-chars",
+        type=int,
+        default=DEFAULT_CUE_CHARS,
+        help="Longest subtitle cue in characters; 0 disables splitting by length",
+    )
     render.add_argument(
         "--no-mark-uncertain",
         dest="mark_uncertain",

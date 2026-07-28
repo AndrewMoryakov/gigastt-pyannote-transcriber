@@ -40,3 +40,7 @@ output:
     - vtt
   # Mark turns whose speaker attribution is not confirmed by exclusive overlap.
   mark_uncertain_words: true
+  # SRT/VTT cue limits. A turn longer than this is cut on word boundaries so the
+  # timings stay real. Set either to 0 to disable that limit.
+  subtitle_max_seconds: 6
+  subtitle_max_chars: 84

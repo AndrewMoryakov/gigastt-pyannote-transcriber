@@ -105,3 +105,89 @@ def test_marking_can_be_disabled_without_touching_the_overlap_marker():
 
 def test_turns_without_the_field_are_never_marked():
     assert "спикер под вопросом" not in render_txt(DATA)
+
+
+LONG_TURN = {
+    "duration_s": 30.0,
+    "turns": [
+        {
+            "id": 1,
+            "speaker": "SPEAKER_00",
+            "start": 0.0,
+            "end": 20.0,
+            "text": " ".join(f"слово{i}" for i in range(20)),
+            "overlap": False,
+            "word_start": 0,
+            "word_end": 19,
+        }
+    ],
+    "words": [
+        {
+            "index": i,
+            "word": f"слово{i}",
+            "display_word": f"слово{i}",
+            "start": i * 1.0,
+            "end": i * 1.0 + 0.9,
+            "speaker": "SPEAKER_00",
+        }
+        for i in range(20)
+    ],
+}
+
+
+def _cue_times(srt_text):
+    return [line for line in srt_text.splitlines() if "-->" in line]
+
+
+def test_a_long_turn_becomes_several_cues():
+    cues = _cue_times(render_srt(LONG_TURN))
+    assert len(cues) > 1
+    assert cues[0].startswith("00:00:00,000")
+
+
+def test_no_cue_exceeds_the_time_limit():
+    from fourvoices.render import split_turn
+
+    turn = LONG_TURN["turns"][0]
+    for cue in split_turn(turn, LONG_TURN["words"], max_seconds=6.0, max_chars=0):
+        assert cue["end"] - cue["start"] <= 6.0
+
+
+def test_cues_stay_inside_the_turn_and_never_go_backwards():
+    from fourvoices.render import split_turn
+
+    turn = LONG_TURN["turns"][0]
+    cues = split_turn(turn, LONG_TURN["words"])
+    assert cues[0]["start"] >= turn["start"]
+    assert cues[-1]["end"] <= turn["end"]
+    for earlier, later in zip(cues, cues[1:]):
+        assert earlier["end"] <= later["start"]
+
+
+def test_split_keeps_every_word():
+    from fourvoices.render import split_turn
+
+    cues = split_turn(LONG_TURN["turns"][0], LONG_TURN["words"])
+    assert " ".join(cue["text"] for cue in cues) == LONG_TURN["turns"][0]["text"]
+
+
+def test_srt_numbering_is_continuous_across_split_turns():
+    numbers = [
+        line for line in render_srt(LONG_TURN).splitlines() if line.strip().isdigit()
+    ]
+    assert numbers == [str(i) for i in range(1, len(numbers) + 1)]
+
+
+def test_splitting_can_be_disabled():
+    cues = _cue_times(render_srt(LONG_TURN, max_cue_seconds=0, max_cue_chars=0))
+    assert len(cues) == 1
+
+
+def test_a_turn_without_word_timings_is_left_whole():
+    without_words = {"turns": LONG_TURN["turns"]}
+    assert len(_cue_times(render_srt(without_words))) == 1
+
+
+def test_speaker_label_repeats_in_every_cue_of_a_turn():
+    body = render_srt(LONG_TURN, names={"SPEAKER_00": "Отец"})
+    assert body.count("Отец:") == len(_cue_times(body))
