@@ -30,7 +30,13 @@ from .diarize import (
     load_diarization,
     preload_model,
 )
-from .gigastt import GigaSTTError, load_transcript, transcribe
+from .gigastt import (
+    GigaSTTError,
+    gigastt_version,
+    load_transcript,
+    punctuation_missing,
+    transcribe,
+)
 from .merge import merge_transcript
 from .render import DEFAULT_CUE_CHARS, DEFAULT_CUE_SECONDS, write_outputs
 
@@ -57,6 +63,15 @@ CONFIG_SCHEMA: dict[str, frozenset[str]] = {
             "subtitle_max_chars",
         }
     ),
+}
+
+
+# Stages built from another stage's product. The audio stage is absent on
+# purpose: its WAVs are a deterministic conversion under options the manifest
+# already pins, so recreating a deleted WAV must not throw away the diarization.
+STAGE_DEPENDANTS: dict[str, tuple[str, ...]] = {
+    "asr": ("merge", "render"),
+    "diarization": ("merge", "render"),
 }
 
 
@@ -117,6 +132,13 @@ def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _distribution_version(name: str) -> str | None:
+    try:
+        return importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+        return None
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -398,7 +420,27 @@ def run_pipeline(args: argparse.Namespace) -> Path:
         manifest["updated_at"] = _now()
         _atomic_json(manifest_path, manifest)
 
-    def can_reuse(stage: str, product: Path) -> bool:
+    previous_stages: Mapping[str, Any] = (previous or {}).get("stages", {})
+    # Stages recomputed in this run. Anything built on top of them is stale even
+    # if the manifest still lists it: a new ASR result under an old merge would
+    # render words that are no longer in the transcript.
+    recomputed: set[str] = set()
+
+    def recompute(stage: str) -> None:
+        """Record that ``stage`` is being redone and retract what depends on it.
+
+        The retraction is written at once, so a run interrupted before the
+        dependants are rebuilt cannot leave the manifest vouching for them.
+        """
+
+        recomputed.add(stage)
+        stale = [name for name in STAGE_DEPENDANTS.get(stage, ()) if name in manifest["stages"]]
+        for name in stale:
+            del manifest["stages"][name]
+        if stale:
+            _atomic_json(manifest_path, manifest)
+
+    def can_reuse(stage: str, product: Path, *, inputs: Sequence[str] = ()) -> bool:
         """Reuse a stage only when the manifest vouches for it.
 
         Keying on the file alone would let a missing or truncated manifest slip
@@ -408,7 +450,9 @@ def run_pipeline(args: argparse.Namespace) -> Path:
 
         if args.force or previous is None:
             return False
-        return stage in previous.get("stages", {}) and product.is_file()
+        if any(stage_input in recomputed for stage_input in inputs):
+            return False
+        return stage in previous_stages and product.is_file()
 
     giga_model_dir, pyannote_cache_dir = _model_directories(args, config, base)
     print("[1/5] Preparing separate ASR and diarization audio…", flush=True)
@@ -433,11 +477,34 @@ def run_pipeline(args: argparse.Namespace) -> Path:
 
     intermediate = output_dir / "intermediate"
     asr_path = intermediate / "gigastt.json"
-    if can_reuse("asr", asr_path):
+    current_gigastt = gigastt_version(args.gigastt_exe)
+    recorded_gigastt = previous_stages.get("asr", {}).get("gigastt_version")
+    reuse_asr = can_reuse("asr", asr_path)
+    if reuse_asr and current_gigastt is None:
+        print(
+            "warning: cannot determine the GigaSTT version; reusing the ASR result "
+            f"recorded for {recorded_gigastt or 'an unknown version'} unverified.",
+            file=sys.stderr,
+            flush=True,
+        )
+    elif reuse_asr and recorded_gigastt != current_gigastt:
+        # A GigaSTT release changes the words and their timings, not only the
+        # speed, so an ASR result is only as current as the binary that made it.
+        # Diarization does not depend on it and is kept.
+        print(
+            f"[2/5] ASR was produced by GigaSTT {recorded_gigastt or '(unrecorded)'}; "
+            f"redoing it with {current_gigastt}.",
+            flush=True,
+        )
+        reuse_asr = False
+    if reuse_asr:
         print("[2/5] Reusing GigaSTT timestamps.", flush=True)
         transcript = load_transcript(asr_path)
+        asr_version = recorded_gigastt
     else:
         print("[2/5] Running GigaSTT RNNT…", flush=True)
+        recompute("asr")
+        asr_version = current_gigastt
         transcript = transcribe(
             prepared.asr_path,
             asr_path,
@@ -449,24 +516,59 @@ def run_pipeline(args: argparse.Namespace) -> Path:
             vad=options["vad"],
             encoder_threads=args.encoder_threads,
         )
+    unpunctuated = punctuation_missing(transcript, options["punctuation"])
+    if unpunctuated:
+        print(
+            f"warning: punctuation was requested, but GigaSTT returned "
+            f"{len(transcript['words'])} words without a single sentence mark. The "
+            "transcript will be lowercase and unpunctuated; see intermediate/gigastt.log.",
+            file=sys.stderr,
+            flush=True,
+        )
     mark(
         "asr",
         {
             "result": "intermediate/gigastt.json",
+            "gigastt_version": asr_version,
             "words": len(transcript["words"]),
             "duration": float(
                 transcript.get("duration", transcript.get("duration_s", 0.0))
             ),
+            "punctuation_missing": unpunctuated,
         },
     )
 
     diarization_path = intermediate / "pyannote.json"
     reused_diarization = False
+    runtime = {
+        "pyannote_audio_version": _distribution_version("pyannote.audio"),
+        "torch_version": _distribution_version("torch"),
+    }
     if can_reuse("diarization", diarization_path):
         print("[3/5] Reusing pyannote diarization.", flush=True)
         diarization_result = load_diarization(diarization_path)
         reused_diarization = True
+        recorded_runtime = {
+            key: previous_stages.get("diarization", {}).get(key) for key in runtime
+        }
+        changed = [
+            f"{key.removesuffix('_version')} {recorded_runtime[key]} -> {runtime[key]}"
+            for key in runtime
+            if recorded_runtime[key] and runtime[key] and recorded_runtime[key] != runtime[key]
+        ]
+        if changed:
+            # The model itself is pinned by revision, and diarization is the most
+            # expensive stage, so a library upgrade is reported, not acted on.
+            print(
+                "warning: the reused diarization was produced with "
+                + ", ".join(changed)
+                + "; use --force to redo it with the current libraries.",
+                file=sys.stderr,
+                flush=True,
+            )
+        runtime = recorded_runtime
     else:
+        recompute("diarization")
         print(
             f"[3/5] Running pinned Community-1 ({options['num_speakers']} speakers)…",
             flush=True,
@@ -500,6 +602,7 @@ def run_pipeline(args: argparse.Namespace) -> Path:
             "result": "intermediate/pyannote.json",
             "model": MODEL_ID,
             "revision": MODEL_REVISION,
+            **runtime,
             "speakers": labels,
             "requested_num_speakers": options["num_speakers"],
             "speaker_count_matches_request": len(labels) == options["num_speakers"],
@@ -507,7 +610,7 @@ def run_pipeline(args: argparse.Namespace) -> Path:
     )
 
     merged_path = intermediate / "merged.json"
-    if can_reuse("merge", merged_path):
+    if can_reuse("merge", merged_path, inputs=("asr", "diarization")):
         print("[4/5] Reusing merged transcript.", flush=True)
         merged = _load_json(merged_path)
     else:

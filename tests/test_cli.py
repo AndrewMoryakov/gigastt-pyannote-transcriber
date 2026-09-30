@@ -140,6 +140,8 @@ class Recorder:
         self.asr = 0
         self.diarization = 0
         self.audio_overwrite = []
+        self.gigastt_version = "2.21.0"
+        self.transcript = TRANSCRIPT
 
 
 @pytest.fixture
@@ -170,8 +172,8 @@ def pipeline(tmp_path, monkeypatch):
 
     def fake_transcribe(audio_path, output_json, **kwargs):
         calls.asr += 1
-        cli._atomic_json(Path(output_json), TRANSCRIPT)
-        return dict(TRANSCRIPT)
+        cli._atomic_json(Path(output_json), calls.transcript)
+        return dict(calls.transcript)
 
     def fake_diarize(audio_path, output_json, **kwargs):
         calls.diarization += 1
@@ -181,6 +183,7 @@ def pipeline(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "prepare_audio", fake_prepare_audio)
     monkeypatch.setattr(cli, "transcribe", fake_transcribe)
     monkeypatch.setattr(cli, "diarize", fake_diarize)
+    monkeypatch.setattr(cli, "gigastt_version", lambda executable: calls.gigastt_version)
     monkeypatch.chdir(tmp_path)
     return calls, source, config, project
 
@@ -351,3 +354,134 @@ def test_thread_default_follows_the_machine_not_a_hardcoded_number():
 def test_an_explicit_thread_count_still_wins():
     args = cli.build_parser().parse_args(["run", "--input", "x", "--torch-threads", "4"])
     assert args.torch_threads == 4
+
+
+# ------------------------------------------------------- tool versions & cascade
+
+
+def read_manifest(job):
+    return json.loads((job / "manifest.json").read_text(encoding="utf-8"))
+
+
+def test_the_gigastt_version_is_recorded_with_the_asr_stage(pipeline):
+    _, source, config, _ = pipeline
+    job = run(source, config)
+
+    assert read_manifest(job)["stages"]["asr"]["gigastt_version"] == "2.21.0"
+
+
+def test_a_new_gigastt_redoes_asr_and_merge_but_keeps_diarization(pipeline, capsys):
+    calls, source, config, _ = pipeline
+    job = run(source, config)
+
+    calls.gigastt_version = "2.22.0"
+    calls.transcript = dict(
+        TRANSCRIPT,
+        text="первый третий",
+        words=[TRANSCRIPT["words"][0], dict(TRANSCRIPT["words"][1], word="третий")],
+    )
+    run(source, config)
+
+    assert (calls.asr, calls.diarization) == (2, 1)
+    assert "redoing it with 2.22.0" in capsys.readouterr().out
+    merged = json.loads((job / "intermediate" / "merged.json").read_text(encoding="utf-8"))
+    # The merge must follow the new words, not be reused from the old ASR.
+    assert [word["word"] for word in merged["words"]] == ["первый", "третий"]
+    assert read_manifest(job)["stages"]["asr"]["gigastt_version"] == "2.22.0"
+
+
+def test_an_asr_stage_without_a_recorded_version_is_redone(pipeline):
+    calls, source, config, _ = pipeline
+    job = run(source, config)
+    manifest = read_manifest(job)
+    del manifest["stages"]["asr"]["gigastt_version"]  # a job from an older release
+    (job / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    run(source, config)
+
+    assert (calls.asr, calls.diarization) == (2, 1)
+
+
+def test_an_unknown_current_version_reuses_asr_with_a_warning(pipeline, capsys):
+    calls, source, config, _ = pipeline
+    job = run(source, config)
+    calls.gigastt_version = None
+
+    run(source, config)
+
+    assert calls.asr == 1
+    assert "unverified" in capsys.readouterr().err
+    # The stage keeps the version it was actually produced with.
+    assert read_manifest(job)["stages"]["asr"]["gigastt_version"] == "2.21.0"
+
+
+def test_an_interrupted_rerun_does_not_leave_a_stale_merge_vouched_for(pipeline, monkeypatch):
+    calls, source, config, _ = pipeline
+    job = run(source, config)
+
+    calls.gigastt_version = "2.22.0"
+
+    def interrupted(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "merge_transcript", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        run(source, config)
+
+    stages = read_manifest(job)["stages"]
+    assert stages["asr"]["gigastt_version"] == "2.22.0"
+    assert "merge" not in stages and "render" not in stages
+
+
+def test_a_recomputed_diarization_invalidates_the_merge(pipeline):
+    calls, source, config, _ = pipeline
+    job = run(source, config)
+    manifest = read_manifest(job)
+    del manifest["stages"]["diarization"]
+    (job / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    merged_path = job / "intermediate" / "merged.json"
+    merged_path.write_text('{"words": [], "turns": [], "speakers": []}', encoding="utf-8")
+
+    run(source, config)
+
+    assert (calls.asr, calls.diarization) == (1, 2)
+    assert json.loads(merged_path.read_text(encoding="utf-8"))["words"]
+
+
+def test_library_versions_are_recorded_with_the_diarization(pipeline):
+    _, source, config, _ = pipeline
+    job = run(source, config)
+
+    stage = read_manifest(job)["stages"]["diarization"]
+    assert stage["pyannote_audio_version"]
+    assert stage["torch_version"]
+
+
+def test_a_library_upgrade_warns_but_keeps_the_diarization(pipeline, capsys):
+    calls, source, config, _ = pipeline
+    job = run(source, config)
+    manifest = read_manifest(job)
+    manifest["stages"]["diarization"]["pyannote_audio_version"] = "3.9.9"
+    (job / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    run(source, config)
+
+    assert calls.diarization == 1
+    assert "pyannote_audio 3.9.9 ->" in capsys.readouterr().err
+    # The record keeps describing the run that produced the diarization.
+    stage = read_manifest(job)["stages"]["diarization"]
+    assert stage["pyannote_audio_version"] == "3.9.9"
+
+
+def test_missing_punctuation_is_reported_and_recorded(pipeline, capsys):
+    calls, source, config, _ = pipeline
+    words = [
+        {"word": "слово", "start": index * 0.5, "end": index * 0.5 + 0.4, "confidence": 0.9}
+        for index in range(250)
+    ]
+    calls.transcript = {"duration": 130.0, "text": " ".join(["слово"] * 250), "words": words}
+
+    job = run(source, config)
+
+    assert "without a single sentence mark" in capsys.readouterr().err
+    assert read_manifest(job)["stages"]["asr"]["punctuation_missing"] is True

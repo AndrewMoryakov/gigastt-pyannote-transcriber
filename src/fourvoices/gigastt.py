@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
+import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -12,6 +14,73 @@ from typing import Any
 
 class GigaSTTError(RuntimeError):
     """GigaSTT failed or returned an incompatible result."""
+
+
+# GigaSTT logs through `tracing` and colours its output even when piped.
+_ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+_LOG_LEVEL = re.compile(r"\b(WARN|ERROR)\b")
+# Logged on every run because the pipeline deliberately does not download
+# GigaSTT's own speaker model: pyannote does the diarization here.
+_EXPECTED_NOISE = ("gigastt_core::inference::diarization",)
+_MAX_REPORTED_PROBLEMS = 10
+
+# Below this many words a transcript may legitimately carry no punctuation.
+_PUNCTUATION_CHECK_MIN_WORDS = 200
+_SENTENCE_MARKS = frozenset(".,?!…;:")
+
+
+def gigastt_version(executable: str = "gigastt") -> str | None:
+    """Version reported by ``gigastt --version``, or None if it cannot be run.
+
+    Recorded next to the ASR result so a different binary is noticed on resume:
+    releases change the words themselves, not only the speed.
+    """
+
+    try:
+        completed = subprocess.run(
+            [executable, "--version"],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    match = re.search(r"\b(\d+\.\d+\.\d+\S*)", completed.stdout)
+    return match.group(1) if match else None
+
+
+def log_problems(log: str) -> list[str]:
+    """WARN and ERROR lines from GigaSTT's log, without colour codes.
+
+    GigaSTT reports some degraded results only here and still exits with 0:
+    2.15.0 logged "Punctuation restore failed, returning bare text" and returned
+    an unpunctuated transcript once the text outgrew the punctuation model's
+    2048-token window, i.e. somewhere between ten and thirty minutes of speech.
+    """
+
+    problems: list[str] = []
+    for line in _ANSI.sub("", log).splitlines():
+        text = line.strip()
+        if _LOG_LEVEL.search(text) and not any(item in text for item in _EXPECTED_NOISE):
+            problems.append(text)
+    return problems
+
+
+def punctuation_missing(payload: Mapping[str, Any], punctuation: str) -> bool:
+    """Whether punctuation was requested but the text plainly came back without it.
+
+    A long transcript with not a single sentence mark is not a plausible result
+    of punctuation restoration; it is a restoration step that gave up.
+    """
+
+    if punctuation != "on":
+        return False
+    words = payload.get("words") or []
+    if len(words) < _PUNCTUATION_CHECK_MIN_WORDS:
+        return False
+    return not any(character in _SENTENCE_MARKS for character in str(payload.get("text", "")))
 
 
 def parse_gigastt_json(value: str | bytes | Mapping[str, Any]) -> dict[str, Any]:
@@ -68,13 +137,19 @@ def transcribe(
     extra_args: Sequence[str] = (),
     env: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Run offline GigaSTT and atomically persist its timestamped JSON."""
+    """Run offline GigaSTT and atomically persist its timestamped JSON.
+
+    GigaSTT's log is kept next to the result (``gigastt.json`` ->
+    ``gigastt.log``), success or not, and its warnings are repeated on stderr:
+    it is the only place some degraded results are reported.
+    """
 
     source = Path(audio_path)
     destination = Path(output_json)
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_name(destination.name + ".partial")
     temporary.unlink(missing_ok=True)
+    log_path = destination.with_suffix(".log")
     command = [
         executable,
         "transcribe",
@@ -118,8 +193,24 @@ def transcribe(
             f"GigaSTT executable '{executable}' was not found on PATH."
         ) from exc
     except subprocess.CalledProcessError as exc:
-        detail = (exc.stderr or exc.stdout or "").strip()
-        raise GigaSTTError(f"GigaSTT exited with code {exc.returncode}: {detail}") from exc
+        _write_log(log_path, exc.stderr)
+        # The log opens with model-loading chatter; the reason is at the end.
+        lines = _ANSI.sub("", exc.stderr or exc.stdout or "").strip().splitlines()
+        detail = "\n".join(lines[-5:])
+        raise GigaSTTError(
+            f"GigaSTT exited with code {exc.returncode} (full log: {log_path.name}): {detail}"
+        ) from exc
+    _write_log(log_path, completed.stderr)
+    problems = log_problems(completed.stderr or "")
+    for line in problems[:_MAX_REPORTED_PROBLEMS]:
+        print(f"warning: GigaSTT: {line}", file=sys.stderr, flush=True)
+    if len(problems) > _MAX_REPORTED_PROBLEMS:
+        hidden = len(problems) - _MAX_REPORTED_PROBLEMS
+        print(
+            f"warning: GigaSTT: {hidden} more warning(s) in {log_path.name}",
+            file=sys.stderr,
+            flush=True,
+        )
     if temporary.is_file():
         raw = temporary.read_text(encoding="utf-8-sig")
     else:
@@ -141,6 +232,10 @@ def transcribe(
     finally:
         temporary.unlink(missing_ok=True)
     return payload
+
+
+def _write_log(path: Path, text: str | None) -> None:
+    path.write_text(_ANSI.sub("", text or ""), encoding="utf-8")
 
 
 def load_transcript(path: str | Path) -> dict[str, Any]:
