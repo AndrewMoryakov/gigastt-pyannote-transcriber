@@ -20,7 +20,7 @@
 
 - **If** you have a Russian-language recording of several people talking (an interview, a meeting, a call) and need to know **who said what**, **then** this turns one audio file into a transcript with a speaker label on every turn.
 - **If** you want it on your own machine with no GPU, **then** it is a CPU-only pipeline for Windows 10/11 x64; any CPU works, a slower one is simply slower.
-- **If** you will have to quote the result and check it by ear, **then** it keeps real word timings, flags overlapping speech and uncertain attribution instead of hiding them, never guesses people's names, and pins every model by URL + SHA-256 or git revision.
+- **If** you will have to quote the result and check it by ear, **then** it keeps real word timings, flags overlapping speech and uncertain attribution instead of hiding them, never guesses people's names, and pins the GigaSTT executable by URL + SHA-256 and the pyannote model by git revision.
 - **If** re-running should not waste hours, **then** finished stages are resumed from disk and changed settings stop the run instead of being silently mixed.
 
 **Honest caveats.** It is built around four-person conversations on a single microphone (`num_speakers: 4` by default; `-NumSpeakers 3` and so on to change). It needs a **Hugging Face account and a read token** — the pyannote model is gated, and `HF_TOKEN` is required for every transcription run, not only for downloading. The first install needs the network and roughly 10 GB. It is not a hosted service and not a GPU pipeline (the pinned PyTorch build is CPU-only). Automatic transcription is not a guarantee of verbatim accuracy — see the closing note below.
@@ -35,7 +35,7 @@ The transcripts themselves are Russian, so the markers inside them (`перек�
 - **Two audio copies from one source** — a near-original one for diarization, a gently filtered one for recognition; the original file is never modified.
 - **Resumable, reproducible jobs** — a manifest vouches for each finished stage; changing an option that affects the result requires `--force`.
 - **Hand-assigned names** — fill in a speaker map after listening and re-render without any inference.
-- **Pinned and verified** — GigaSTT by URL and SHA-256, pyannote by full git revision; repo-hygiene checks keep audio, tokens and models out of Git.
+- **Pinned where it can be** — the GigaSTT executable by URL and SHA-256, pyannote by full git revision (the GigaAM RNNT, punctuation and VAD weights fetched by `gigastt` are not hash-pinned yet); repo-hygiene checks keep audio, tokens and models out of Git.
 
 ## How it works
 
@@ -406,7 +406,7 @@ left as a single cue — a wrong timestamp is worse than a long subtitle.
 - Run `.\scripts\check-repo-hygiene.ps1` before committing.
 - Setting `HF_TOKEN` for the current PowerShell process only is preferred. A
   local `.env` is supported as a fallback and is ignored by Git.
-- GigaSTT is pinned by URL and SHA-256; pyannote by full git revision.
+- The GigaSTT executable is pinned by URL and SHA-256; pyannote by full git revision. The GigaAM RNNT, punctuation and VAD weights are downloaded by `gigastt` itself and are not hash-pinned.
 - The first download needs the network; once the models are in place, the
   processing itself is entirely local.
 
