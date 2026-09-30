@@ -14,7 +14,7 @@
 .\scripts\run.ps1 -InputAudio '.\media\recording.m4a'   # -> transcript.{md,txt,srt,vtt,json}
 ```
 
-**Fourvoices: GigaSTT + pyannote for four voices.** A local, CPU-only pipeline for Russian-language recordings: **GigaSTT 2.15.0 / GigaAM v3 RNNT** recognises the words and their timings, **pyannote Community-1** says who spoke when, and the `fourvoices` Python package aligns the two in time. (The package and CLI are called `fourvoices`; the repository is `gigastt-pyannote-transcriber`.) Source audio, models, tokens and results are deliberately kept out of Git.
+**Fourvoices: GigaSTT + pyannote for four voices.** A local, CPU-only pipeline for Russian-language recordings: **GigaSTT 2.21.0 / GigaAM v3 RNNT** recognises the words and their timings, **pyannote Community-1** says who spoke when, and the `fourvoices` Python package aligns the two in time. (The package and CLI are called `fourvoices`; the repository is `gigastt-pyannote-transcriber`.) Source audio, models, tokens and results are deliberately kept out of Git.
 
 ## Why gigastt-pyannote-transcriber?
 
@@ -35,7 +35,7 @@ The transcripts themselves are Russian, so the markers inside them (`перек�
 - **Two audio copies from one source** — a near-original one for diarization, a gently filtered one for recognition; the original file is never modified.
 - **Resumable, reproducible jobs** — a manifest vouches for each finished stage; changing an option that affects the result requires `--force`.
 - **Hand-assigned names** — fill in a speaker map after listening and re-render without any inference.
-- **Pinned where it can be** — the GigaSTT executable by URL and SHA-256, pyannote by full git revision (the GigaAM RNNT, punctuation and VAD weights fetched by `gigastt` are not hash-pinned yet); repo-hygiene checks keep audio, tokens and models out of Git.
+- **Pinned where it can be** — the GigaSTT executable by URL and SHA-256 (and GigaSTT in turn verifies the GigaAM RNNT, punctuation and VAD weights against SHA-256 digests compiled into it), pyannote by full git revision; each stage records the tool version that produced it; repo-hygiene checks keep audio, tokens and models out of Git.
 
 ## How it works
 
@@ -160,7 +160,7 @@ Do **not** clear the token at this point: transcription needs it too. Clearing
 it (`Remove-Item Env:HF_TOKEN`) makes sense only when you are done for the day,
 remembering that the next PowerShell window will need it set again.
 
-`download-models.ps1` downloads exactly GigaSTT **v2.15.0** for Windows x64,
+`download-models.ps1` downloads exactly GigaSTT **v2.21.0** for Windows x64,
 verifies the archive against the SHA-256 in `tools/tools.lock.json`, then
 fetches RNNT INT8, VAD, punctuation and the pinned pyannote revision. An
 unverified `gigastt.exe` is never executed.
@@ -206,6 +206,7 @@ directory.
   audio/asr.wav          the recognition copy (filtered)
   audio/diarization.wav  the diarization copy (unfiltered)
   intermediate/gigastt.json    words and their timings
+  intermediate/gigastt.log     GigaSTT's own log of that run
   intermediate/pyannote.json   speaker segments
   intermediate/merged.json     the combined result
   transcript.{md,txt,srt,vtt,json}
@@ -222,6 +223,21 @@ old and new stages silently is not allowed. PyTorch thread counts do not affect
 the result and do not trigger a rebuild. An interrupted run (Ctrl+C) continues
 from the last **completed** stage; a stage interrupted midway counts as never
 computed and runs again in full.
+
+Each stage also records the software that produced it. A GigaSTT release
+changes the words and their timings, so when the pinned GigaSTT differs from
+the one recorded for a job (or none was recorded — jobs made before this was
+tracked), only recognition is redone and everything built on it follows;
+the diarization is kept. A different `pyannote.audio` or `torch` only prints a
+warning, because the model is pinned by revision and diarization is the most
+expensive stage — use `--force` if you want it redone. Whenever recognition or
+diarization is redone, the merged result is rebuilt rather than reused.
+
+GigaSTT reports some problems only in its log while still succeeding, so its
+warnings are repeated on screen and the log is kept in `intermediate/`. One
+such problem is checked explicitly: if punctuation was requested but a long
+transcript comes back without a single sentence mark, the run warns and the
+manifest records `punctuation_missing: true`.
 
 Changing the presentation needs no inference at all — use the `render` command,
 which re-reads `merged.json`.
@@ -299,6 +315,19 @@ A configuration asking for anything else is rejected, not silently honoured.
 
 `device: cpu` — the pinned PyTorch build is CPU-only; there is no CUDA here.
 
+**Why Community-1 and not Precision.** pyannote's commercial models
+(`precision-2`, and since September 2026 `precision-3` behind the same
+`pyannote/speaker-diarization-precision` pipeline) score a noticeably lower
+diarization error rate — on pyannote's own benchmarks roughly 15 % against
+20 % on meeting recordings such as AMI and AliMeeting. They are, however,
+served only through the pyannoteAI cloud API: the pipeline in `pyannote.audio`
+uploads the audio file to pyannoteAI and needs a paid API key, and there are
+no downloadable weights (self-hosting is offered only on enterprise
+contracts). This project exists to keep recordings on the machine, so it stays
+on Community-1, the newest open model, and does not offer the cloud model as
+an option. pyannote's usage telemetry (file duration and speaker count sent
+to `otel.pyannote.ai`) is switched off unconditionally for the same reason.
+
 ### Recognition
 
 `model_variant: rnnt` — the entire pipeline is built on per-word timings:
@@ -315,6 +344,20 @@ costs readability, not timings.
 
 `vad: true` — voice activity detection keeps the recogniser out of long
 silences, where it would otherwise be free to invent text.
+
+**Why GigaSTT 2.21.0.** The previously pinned 2.15.0 had two faults that hit
+exactly the recordings this pipeline is for, both fixed in 2.16.0 and both
+reproduced here on real Russian speech. Once the text outgrew the punctuation
+model's 2048-token window (a 28-minute recording, 1 574 words) punctuation was
+silently dropped: exit code 0, a lowercase transcript without a single mark.
+And with `--vad`, anything longer than 30 minutes was refused outright. 2.21.0
+decodes files in bounded windows with no length cap (a 36-minute recording was
+checked end to end), punctuates long transcripts in overlapping windows, and
+verifies the recognition weights against pinned SHA-256 digests at every load.
+Every flag this project passes behaves as before, and on the same audio the
+raw words differ by a handful out of a thousand. Jobs
+made with 2.15.0 are re-recognised automatically on their next run (see
+[What a job directory contains](#what-a-job-directory-contains)).
 
 ### Merging
 
@@ -406,7 +449,8 @@ left as a single cue — a wrong timestamp is worse than a long subtitle.
 - Run `.\scripts\check-repo-hygiene.ps1` before committing.
 - Setting `HF_TOKEN` for the current PowerShell process only is preferred. A
   local `.env` is supported as a fallback and is ignored by Git.
-- The GigaSTT executable is pinned by URL and SHA-256; pyannote by full git revision. The GigaAM RNNT, punctuation and VAD weights are downloaded by `gigastt` itself and are not hash-pinned.
+- The GigaSTT executable is pinned by URL and SHA-256; pyannote by full git revision. The GigaAM RNNT, punctuation and VAD weights are downloaded by `gigastt` itself, which checks them against SHA-256 digests built into the pinned executable; the RNNT files are checked again every time they are loaded. The pyannote weights are pinned by revision only.
+- Telemetry is off: pyannote's usage metrics and Hugging Face Hub telemetry are disabled by the code itself, whatever the shell sets.
 - The first download needs the network; once the models are in place, the
   processing itself is entirely local.
 
