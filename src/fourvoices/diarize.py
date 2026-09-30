@@ -11,9 +11,12 @@ from pathlib import Path
 from typing import Any
 
 # Evidence processing is local by design. Set these before importing HF/pyannote.
-os.environ.setdefault("PYANNOTE_METRICS_ENABLED", "0")
-os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
-os.environ.setdefault("DO_NOT_TRACK", "1")
+# Assigned, not defaulted: pyannote.audio 4 reports file durations and speaker
+# counts to otel.pyannote.ai unless PYANNOTE_METRICS_ENABLED is false, and a
+# value inherited from the shell must not be able to switch that back on.
+os.environ["PYANNOTE_METRICS_ENABLED"] = "0"
+os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
+os.environ["DO_NOT_TRACK"] = "1"
 
 MODEL_ID = "pyannote/speaker-diarization-community-1"
 # Pin the model artifact so a later upstream update cannot silently change evidence.
