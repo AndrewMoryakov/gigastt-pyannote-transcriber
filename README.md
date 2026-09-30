@@ -1,21 +1,74 @@
-# Fourvoices: GigaSTT + pyannote for four voices
+<p align="center"><img src="docs/assets/gigastt-pyannote-transcriber-hero.png" alt="gigastt-pyannote-transcriber: two people talk, a speech-to-text stenographer writes down words with timestamps, a speaker tagger assigns each word to a speaker, and a who-said-what transcript comes out" width="100%"></p>
+<h1 align="center">gigastt-pyannote-transcriber</h1>
+<p align="center"><b>Russian recording in, who-said-what transcript out — a local, CPU-only pipeline (GigaSTT + pyannote) for multi-speaker conversations you will have to quote and check by ear.</b></p>
+<p align="center">
+  <a href="pyproject.toml"><img alt="Python 3.11" src="https://img.shields.io/badge/Python-3.11-3776AB.svg?logo=python&logoColor=white"></a>
+  <a href="#requirements"><img alt="Platform: Windows 10/11 x64" src="https://img.shields.io/badge/Platform-Windows%2010%2F11%20x64-0078D6.svg?logo=windows&logoColor=white"></a>
+  <a href="#requirements"><img alt="CPU only" src="https://img.shields.io/badge/runs%20on-CPU%20only-2E7D57.svg"></a>
+  <a href="pyproject.toml"><img alt="Version 0.1.0" src="https://img.shields.io/badge/version-0.1.0-blue.svg"></a>
+  <a href="https://github.com/AndrewMoryakov/gigastt-pyannote-transcriber/actions/workflows/tests.yml"><img alt="tests" src="https://github.com/AndrewMoryakov/gigastt-pyannote-transcriber/actions/workflows/tests.yml/badge.svg"></a>
+</p>
+<p align="center"><b>English</b> | <a href="README.ru.md">Русский</a></p>
 
-*Русская версия: [README_RU.md](README_RU.md).*
+```powershell
+.\scripts\run.ps1 -InputAudio '.\media\recording.m4a'   # -> transcript.{md,txt,srt,vtt,json}
+```
 
-A local, CPU-only pipeline for Russian-language recordings:
+**Fourvoices: GigaSTT + pyannote for four voices.** A local, CPU-only pipeline for Russian-language recordings: **GigaSTT 2.15.0 / GigaAM v3 RNNT** recognises the words and their timings, **pyannote Community-1** says who spoke when, and the `fourvoices` Python package aligns the two in time. (The package and CLI are called `fourvoices`; the repository is `gigastt-pyannote-transcriber`.) Source audio, models, tokens and results are deliberately kept out of Git.
 
-1. **GigaSTT 2.15.0 / GigaAM v3 RNNT** recognises the words and their timings.
-2. **pyannote Community-1** is given `num_speakers=4` and produces an exclusive
-   diarization.
-3. `fourvoices` aligns the two in time and writes JSON, Markdown, plain text,
-   SRT and VTT.
+## Why gigastt-pyannote-transcriber?
 
-Source audio, models, tokens and results are deliberately kept out of Git.
+- **If** you have a Russian-language recording of several people talking (an interview, a meeting, a call) and need to know **who said what**, **then** this turns one audio file into a transcript with a speaker label on every turn.
+- **If** you want it on your own machine with no GPU, **then** it is a CPU-only pipeline for Windows 10/11 x64; any CPU works, a slower one is simply slower.
+- **If** you will have to quote the result and check it by ear, **then** it keeps real word timings, flags overlapping speech and uncertain attribution instead of hiding them, never guesses people's names, and pins every model by URL + SHA-256 or git revision.
+- **If** re-running should not waste hours, **then** finished stages are resumed from disk and changed settings stop the run instead of being silently mixed.
 
-The transcripts themselves are Russian, so the markers inside them
-(`перекрытие речи`, `спикер под вопросом`) are Russian too. This document is
-the reference for operating the pipeline, not a description of its output
-language.
+**Honest caveats.** It is built around four-person conversations on a single microphone (`num_speakers: 4` by default; `-NumSpeakers 3` and so on to change). It needs a **Hugging Face account and a read token** — the pyannote model is gated, and `HF_TOKEN` is required for every transcription run, not only for downloading. The first install needs the network and roughly 10 GB. It is not a hosted service and not a GPU pipeline (the pinned PyTorch build is CPU-only). Automatic transcription is not a guarantee of verbatim accuracy — see the closing note below.
+
+The transcripts themselves are Russian, so the markers inside them (`перекрытие речи`, `спикер под вопросом`) are Russian too. This document is the reference for operating the pipeline, not a description of its output language.
+
+## Features
+
+- **Words with timings, then speakers** — GigaSTT (RNNT) gives per-word timestamps; pyannote gives exclusive diarization; every word is assigned a speaker by time.
+- **Five output formats** — JSON, Markdown, plain text, SRT and VTT from one run; subtitles are split on word boundaries with real timings.
+- **Honest uncertainty** — `[перекрытие речи]` for overlapping speech and `[спикер под вопросом]` for doubtful attribution mark where to listen again.
+- **Two audio copies from one source** — a near-original one for diarization, a gently filtered one for recognition; the original file is never modified.
+- **Resumable, reproducible jobs** — a manifest vouches for each finished stage; changing an option that affects the result requires `--force`.
+- **Hand-assigned names** — fill in a speaker map after listening and re-render without any inference.
+- **Pinned and verified** — GigaSTT by URL and SHA-256, pyannote by full git revision; repo-hygiene checks keep audio, tokens and models out of Git.
+
+## How it works
+
+<p align="center">
+  <img src="docs/assets/gigastt-pyannote-transcriber-how-it-works.png" alt="gigastt-pyannote-transcriber: one audio file goes through GigaSTT (what was said, when) and pyannote (who spoke when), the two are merged by time so each word gets a speaker, and the output is a transcript in JSON, Markdown, TXT, SRT and VTT" width="100%">
+</p>
+
+1. **Prepare two audio copies.** One recording becomes a near-original mono 16 kHz copy for diarization and a gently filtered copy for recognition.
+2. **Recognise the words.** GigaSTT (RNNT) produces words with start and end times.
+3. **Find the speakers.** pyannote Community-1 is given `num_speakers=4` and produces an exclusive diarization.
+4. **Align by time.** `fourvoices` gives each word a speaker, marks overlap and uncertain attribution, and writes the transcript in five formats.
+5. **Name the speakers yourself.** Listen to long turns from each cluster, fill in a speaker map, and re-render — labels are never turned into names automatically.
+
+## Quick start
+
+Short version; every step is explained in the [run checklist](#run-checklist) and [the detailed Windows setup](#quick-start-on-a-clean-windows-machine) below. First accept the conditions of the gated pyannote model on Hugging Face and create a read token (see [One-time access](#one-time-access-to-the-gated-hugging-face-model)).
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\scripts\install.ps1 -InstallFfmpeg
+
+# The token lives only in the current PowerShell and is never written to disk:
+$secureToken = Read-Host 'HF read token' -AsSecureString
+$env:HF_TOKEN = [Net.NetworkCredential]::new('', $secureToken).Password
+
+.\scripts\download-models.ps1       # needs network, ~10 GB
+.\scripts\doctor.ps1                # every line must read [OK]
+
+# put recordings in .\media\, then:
+.\scripts\run.ps1 -InputAudio '.\media\recording.m4a'
+```
+
+Results land in `..\gigastt-pyannote-output\<job>\` next to the repository, where they cannot accidentally be committed.
 
 ## Run checklist
 
