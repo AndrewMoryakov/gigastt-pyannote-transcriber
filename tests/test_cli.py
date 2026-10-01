@@ -485,3 +485,43 @@ def test_missing_punctuation_is_reported_and_recorded(pipeline, capsys):
 
     assert "without a single sentence mark" in capsys.readouterr().err
     assert read_manifest(job)["stages"]["asr"]["punctuation_missing"] is True
+
+
+def test_rerender_keeps_the_subtitle_limits_the_run_used(pipeline):
+    calls, source, config, _ = pipeline
+    words = [
+        {"word": word, "start": index * 0.25, "end": index * 0.25 + 0.2, "confidence": 0.9}
+        for index, word in enumerate(["раз", "два", "три", "четыре"])
+    ]
+    calls.transcript = {"duration": 2.0, "text": "раз два три четыре", "words": words}
+    config.write_text(
+        "project:\n  output_root: ../out\n"
+        "output:\n  subtitle_max_seconds: 0.2\n  mark_uncertain_words: false\n",
+        encoding="utf-8",
+    )
+    job = run(source, config)
+    before = (job / "transcript.srt").read_text(encoding="utf-8")
+
+    args = cli.build_parser().parse_args(
+        ["render", "--job-dir", str(job), "--speaker-name", "SPEAKER_00=Отец"]
+    )
+    cli._render_job(args)
+
+    after = (job / "transcript.srt").read_text(encoding="utf-8")
+    assert before.count("-->") > 1  # the 0.2 s limit really split the turn
+    assert after.count("-->") == before.count("-->")
+    stage = read_manifest(job)["stages"]["render"]
+    assert (stage["subtitle_max_seconds"], stage["mark_uncertain"]) == (0.2, False)
+
+
+def test_rerender_flags_still_override_the_recorded_settings(pipeline):
+    _, source, config, _ = pipeline
+    job = run(source, config)
+
+    args = cli.build_parser().parse_args(
+        ["render", "--job-dir", str(job), "--subtitle-max-seconds", "0", "--no-mark-uncertain"]
+    )
+    cli._render_job(args)
+
+    stage = read_manifest(job)["stages"]["render"]
+    assert (stage["subtitle_max_seconds"], stage["mark_uncertain"]) == (0.0, False)

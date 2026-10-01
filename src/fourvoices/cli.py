@@ -650,6 +650,9 @@ def run_pipeline(args: argparse.Namespace) -> Path:
         {
             "files": [path.relative_to(output_dir).as_posix() for path in paths],
             "speaker_names": names,
+            "mark_uncertain": mark_uncertain,
+            "subtitle_max_seconds": subtitles["max_cue_seconds"],
+            "subtitle_max_chars": subtitles["max_cue_chars"],
         },
     )
     print(f"Done: {output_dir}", flush=True)
@@ -665,26 +668,44 @@ def _render_job(args: argparse.Namespace) -> Path:
     names = _speaker_names(
         args.speaker_map, args.speaker_name, known=merged.get("speakers", [])
     )
+    previous = manifest.get("stages", {}).get("render", {})
     previous_formats = ",".join(
-        Path(item).suffix.lstrip(".")
-        for item in manifest.get("stages", {}).get("render", {}).get("files", [])
+        Path(item).suffix.lstrip(".") for item in previous.get("files", [])
     )
     formats = _formats(args.formats or previous_formats or None, {})
+
+    # Renaming speakers must not quietly re-cut the subtitles: whatever the run
+    # was rendered with stays in force unless the command line says otherwise.
+    def setting(value: Any, key: str, default: Any) -> Any:
+        if value is not None:
+            return value
+        return previous.get(key, default)
+
+    mark_uncertain = bool(setting(args.mark_uncertain, "mark_uncertain", True))
+    max_cue_seconds = float(
+        setting(args.subtitle_max_seconds, "subtitle_max_seconds", DEFAULT_CUE_SECONDS)
+    )
+    max_cue_chars = int(
+        setting(args.subtitle_max_chars, "subtitle_max_chars", DEFAULT_CUE_CHARS)
+    )
     paths = write_outputs(
         merged,
         job,
         stem=args.output_stem,
         formats=formats,
         names=names,
-        mark_uncertain=args.mark_uncertain,
-        max_cue_seconds=args.subtitle_max_seconds,
-        max_cue_chars=args.subtitle_max_chars,
+        mark_uncertain=mark_uncertain,
+        max_cue_seconds=max_cue_seconds,
+        max_cue_chars=max_cue_chars,
     )
     if manifest:
         manifest.setdefault("stages", {})["render"] = {
             "completed_at": _now(),
             "files": [path.relative_to(job).as_posix() for path in paths],
             "speaker_names": names,
+            "mark_uncertain": mark_uncertain,
+            "subtitle_max_seconds": max_cue_seconds,
+            "subtitle_max_chars": max_cue_chars,
         }
         manifest["updated_at"] = _now()
         _atomic_json(manifest_path, manifest)
@@ -802,19 +823,20 @@ def build_parser() -> argparse.ArgumentParser:
     render.add_argument(
         "--subtitle-max-seconds",
         type=float,
-        default=DEFAULT_CUE_SECONDS,
-        help="Longest subtitle cue; 0 disables splitting by time",
+        help="Longest subtitle cue; 0 disables splitting by time "
+        "(default: what the job was last rendered with)",
     )
     render.add_argument(
         "--subtitle-max-chars",
         type=int,
-        default=DEFAULT_CUE_CHARS,
-        help="Longest subtitle cue in characters; 0 disables splitting by length",
+        help="Longest subtitle cue in characters; 0 disables splitting by length "
+        "(default: what the job was last rendered with)",
     )
     render.add_argument(
         "--no-mark-uncertain",
         dest="mark_uncertain",
         action="store_false",
+        default=None,
         help="Do not mark turns whose speaker attribution is unconfirmed",
     )
     return parser
