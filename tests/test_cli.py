@@ -605,3 +605,67 @@ def test_doctor_notices_a_gigastt_that_does_not_match_the_lock(installed, capsys
 
     assert doctor(config, exe) == 2
     assert "tools.lock.json pins 2.21.0" in capsys.readouterr().out
+
+
+# ------------------------------------------------ independent-review follow-ups
+
+
+def test_an_interruption_inside_asr_already_retracts_the_merge(pipeline, monkeypatch):
+    calls, source, config, _ = pipeline
+    job = run(source, config)
+    calls.gigastt_version = "2.22.0"
+
+    def interrupted(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "transcribe", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        run(source, config)
+
+    stages = read_manifest(job)["stages"]
+    assert "merge" not in stages and "render" not in stages
+    # The ASR record still describes the result on disk, so the next run redoes it.
+    assert stages["asr"]["gigastt_version"] == "2.21.0"
+
+
+def test_render_refuses_a_merge_the_manifest_no_longer_vouches_for(pipeline, monkeypatch):
+    calls, source, config, _ = pipeline
+    job = run(source, config)
+    calls.gigastt_version = "2.22.0"
+
+    def interrupted(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "merge_transcript", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        run(source, config)
+
+    args = cli.build_parser().parse_args(["render", "--job-dir", str(job)])
+    with pytest.raises(cli.PipelineError, match="does not vouch"):
+        cli._render_job(args)
+    assert "render" not in read_manifest(job)["stages"]
+
+
+def test_uncertainty_marks_can_be_switched_back_on(pipeline):
+    _, source, config, _ = pipeline
+    job = run(source, config)
+
+    steps = (("--no-mark-uncertain", False), (None, False), ("--mark-uncertain", True))
+    for flag, expected in steps:
+        argv = ["render", "--job-dir", str(job)] + ([flag] if flag else [])
+        cli._render_job(cli.build_parser().parse_args(argv))
+        assert read_manifest(job)["stages"]["render"]["mark_uncertain"] is expected
+
+
+def test_doctor_does_not_demand_models_the_configuration_switches_off(installed, capsys):
+    project, config, exe, _ = installed
+    config.write_text(
+        "asr:\n  model_dir: models/gigastt\n  punctuation: false\n  vad: false\n"
+        "diarization:\n  model_dir: models/pyannote\n",
+        encoding="utf-8",
+    )
+    for name in cli.GIGASTT_PUNCTUATION_FILES + cli.GIGASTT_VAD_FILES:
+        (project / "models" / "gigastt" / name).unlink()
+
+    assert doctor(config, exe) == 0
+    assert "[FAIL]" not in capsys.readouterr().out

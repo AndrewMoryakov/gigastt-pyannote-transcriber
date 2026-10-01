@@ -35,7 +35,7 @@ The transcripts themselves are Russian, so the markers inside them (`перек�
 - **Two audio copies from one source** — a near-original one for diarization, a gently filtered one for recognition; the original file is never modified.
 - **Resumable, reproducible jobs** — a manifest vouches for each finished stage; changing an option that affects the result requires `--force`.
 - **Hand-assigned names** — fill in a speaker map after listening and re-render without any inference.
-- **Pinned where it can be** — the GigaSTT executable by URL and SHA-256 (and GigaSTT in turn verifies the GigaAM RNNT, punctuation and VAD weights against SHA-256 digests compiled into it), pyannote by full git revision; each stage records the tool version that produced it; repo-hygiene checks keep audio, tokens and models out of Git.
+- **Pinned where it can be** — the GigaSTT executable by URL and SHA-256 (and GigaSTT in turn verifies the GigaAM RNNT, punctuation and VAD weights against SHA-256 digests compiled into it), pyannote by full git revision; the recognition and diarization stages record the software versions that produced them; repo-hygiene checks keep audio, tokens and models out of Git.
 
 ## How it works
 
@@ -224,9 +224,10 @@ the result and do not trigger a rebuild. An interrupted run (Ctrl+C) continues
 from the last **completed** stage; a stage interrupted midway counts as never
 computed and runs again in full.
 
-Each stage also records the software that produced it. A GigaSTT release
-changes the words and their timings, so when the pinned GigaSTT differs from
-the one recorded for a job (or none was recorded — jobs made before this was
+The recognition and diarization stages also record the software that
+produced them. A GigaSTT release changes the words and their timings, so when
+the GigaSTT being run (`run.ps1` always runs the one pinned in
+`tools/tools.lock.json`) differs from the one recorded for a job (or none was recorded — jobs made before this was
 tracked), only recognition is redone and everything built on it follows;
 the diarization is kept. A different `pyannote.audio` or `torch` only prints a
 warning, because the model is pinned by revision and diarization is the most
@@ -240,7 +241,12 @@ transcript comes back without a single sentence mark, the run warns and the
 manifest records `punctuation_missing: true`.
 
 Changing the presentation needs no inference at all — use the `render` command,
-which re-reads `merged.json`.
+which re-reads `merged.json`. It keeps the subtitle limits and uncertainty
+marks the job was last rendered with unless you pass a flag (jobs rendered
+before these were recorded fall back to the defaults). It refuses to run when
+the manifest no longer vouches for `merged.json` — after a run that redid
+recognition or diarization was interrupted before rebuilding it; finish that
+run first.
 
 ## Assigning speakers by hand
 
@@ -411,7 +417,8 @@ rebuild. In `run.ps1` a value of `0` means "let fourvoices decide".
   at all.
 
 Switched off with the `output.mark_uncertain_words` key or the
-`--no-mark-uncertain` flag of the `render` command. Both markers are a prompt
+`--no-mark-uncertain` flag of the `render` command, and back on with
+`--mark-uncertain`. Both markers are a prompt
 to listen to the fragment again, not a sign of an error.
 
 ## Subtitles

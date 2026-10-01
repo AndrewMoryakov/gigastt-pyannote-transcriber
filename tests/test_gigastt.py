@@ -202,3 +202,27 @@ def test_a_log_printed_to_stderr_is_kept_as_well(tmp_path, monkeypatch, capsys):
     log = (tmp_path / "gigastt.log").read_text(encoding="utf-8")
     assert "Punctuation restore failed" in log
     assert "Punctuation restore failed" in capsys.readouterr().err
+
+
+def test_numbers_written_by_itn_do_not_pass_for_punctuation():
+    from fourvoices.gigastt import punctuation_missing
+
+    bare = " ".join(["слово"] * 300) + " встреча в 10:30 ставка 1,5 версия 2.21"
+    assert punctuation_missing(_payload(300, bare), "on")
+
+
+def test_a_successful_exit_without_json_points_at_the_log(tmp_path, monkeypatch):
+    import pytest
+
+    from fourvoices.gigastt import GigaSTTError
+
+    source = tmp_path / "input.wav"
+    source.write_bytes(b"RIFF")
+
+    def fake_run(command, **kwargs):
+        return subprocess.CompletedProcess(command, 0, "INFO nothing written\n", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(GigaSTTError, match="wrote no JSON; see gigastt.log"):
+        transcribe(source, tmp_path / "gigastt.json", executable="gigastt.exe")
+    assert not (tmp_path / "gigastt.json.rejected").exists()

@@ -27,6 +27,7 @@ _MAX_REPORTED_PROBLEMS = 10
 # Below this many words a transcript may legitimately carry no punctuation.
 _PUNCTUATION_CHECK_MIN_WORDS = 200
 _SENTENCE_MARKS = frozenset(".,?!…;:")
+_NUMBER_SEPARATOR = re.compile(r"(?<=\d)[.,:](?=\d)")
 
 
 def gigastt_version(executable: str = "gigastt") -> str | None:
@@ -80,7 +81,10 @@ def punctuation_missing(payload: Mapping[str, Any], punctuation: str) -> bool:
     words = payload.get("words") or []
     if len(words) < _PUNCTUATION_CHECK_MIN_WORDS:
         return False
-    return not any(character in _SENTENCE_MARKS for character in str(payload.get("text", "")))
+    # ITN runs before punctuation and writes "1,5" or "10:30" on its own, so a
+    # separator between digits is no evidence that punctuation ran.
+    text = _NUMBER_SEPARATOR.sub("", str(payload.get("text", "")))
+    return not any(character in _SENTENCE_MARKS for character in text)
 
 
 def parse_gigastt_json(value: str | bytes | Mapping[str, Any]) -> dict[str, Any]:
@@ -213,10 +217,12 @@ def transcribe(
             file=sys.stderr,
             flush=True,
         )
-    if temporary.is_file():
-        raw = temporary.read_text(encoding="utf-8-sig")
-    else:
-        raw = completed.stdout
+    if not temporary.is_file():
+        # stdout is GigaSTT's log, not a fallback copy of the JSON.
+        raise GigaSTTError(
+            f"GigaSTT exited with code 0 but wrote no JSON; see {log_path.name}."
+        )
+    raw = temporary.read_text(encoding="utf-8-sig")
     try:
         payload = parse_gigastt_json(raw)
     except GigaSTTError as exc:

@@ -662,9 +662,17 @@ def run_pipeline(args: argparse.Namespace) -> Path:
 def _render_job(args: argparse.Namespace) -> Path:
     job = Path(args.job_dir).expanduser().resolve()
     merged_path = job / "intermediate" / "merged.json"
-    merged = _load_json(merged_path)
     manifest_path = job / "manifest.json"
     manifest = _load_json(manifest_path) if manifest_path.is_file() else {}
+    if manifest and "merge" not in manifest.get("stages", {}):
+        # A run that redid recognition or diarization retracts the merge before
+        # rebuilding it; if it was interrupted, merged.json still holds the old
+        # words and rendering it would publish a transcript nothing vouches for.
+        raise PipelineError(
+            "The manifest does not vouch for intermediate/merged.json (an interrupted "
+            "run redid recognition or diarization). Finish it with the run command first."
+        )
+    merged = _load_json(merged_path)
     names = _speaker_names(
         args.speaker_map, args.speaker_name, known=merged.get("speakers", [])
     )
@@ -715,16 +723,20 @@ def _render_job(args: argparse.Namespace) -> Path:
 
 # Files a run needs from the GigaSTT model directory. With GIGASTT_OFFLINE set
 # (run.ps1 sets it) a missing one is a failed run, not a download.
-GIGASTT_MODEL_FILES = (
+# Only the shipped defaults are listed; another model_variant is not checked.
+GIGASTT_RNNT_FILES = (
     "v3_rnnt_encoder_int8.onnx",
     "v3_rnnt_decoder.onnx",
     "v3_rnnt_joint.onnx",
     "v3_vocab.txt",
+)
+GIGASTT_PUNCTUATION_FILES = (
     "punct/rupunct_small_int8.onnx",
     "punct/tokenizer.json",
     "punct/config.json",
-    "vad/silero_vad.onnx",
 )
+GIGASTT_VAD_FILES = ("vad/silero_vad.onnx",)
+GIGASTT_MODEL_FILES = GIGASTT_RNNT_FILES + GIGASTT_PUNCTUATION_FILES + GIGASTT_VAD_FILES
 
 
 def _pinned_gigastt_version(base: Path | None) -> str | None:
@@ -738,12 +750,22 @@ def _pinned_gigastt_version(base: Path | None) -> str | None:
 
 
 def _model_checks(
-    args: argparse.Namespace, config: Mapping[str, Any], base: Path | None
+    args: argparse.Namespace,
+    config: Mapping[str, Any],
+    base: Path | None,
+    options: Mapping[str, Any],
 ) -> list[tuple[str, bool, str]]:
     checks: list[tuple[str, bool, str]] = []
     giga_dir, pyannote_dir = _model_directories(args, config, base)
-    if giga_dir is not None:
-        missing = [name for name in GIGASTT_MODEL_FILES if not (giga_dir / name).is_file()]
+    required: list[str] = []
+    if options["model_variant"] == "rnnt":
+        required += GIGASTT_RNNT_FILES
+    if options["punctuation"] != "off":
+        required += GIGASTT_PUNCTUATION_FILES
+    if options["vad"]:
+        required += GIGASTT_VAD_FILES
+    if giga_dir is not None and required:
+        missing = [name for name in required if not (giga_dir / name).is_file()]
         checks.append(
             (
                 "GigaSTT models",
@@ -783,7 +805,7 @@ def _doctor(args: argparse.Namespace) -> int:
         torch_threads=DEFAULT_TORCH_THREADS,
         torch_interop_threads=DEFAULT_TORCH_INTEROP_THREADS,
     )
-    _resolved_run_options(probe_args, config)
+    options = _resolved_run_options(probe_args, config)
     checks: list[tuple[str, bool, str]] = []
     for executable in ("ffmpeg", "ffprobe"):
         location = shutil.which(executable)
@@ -799,7 +821,7 @@ def _doctor(args: argparse.Namespace) -> int:
         if pinned and found != pinned:
             detail += f" (tools.lock.json pins {pinned}; run download-models.ps1)"
         checks.append(("gigastt version", matches, detail))
-    checks.extend(_model_checks(args, config, base))
+    checks.extend(_model_checks(args, config, base, options))
     for distribution in ("pyannote.audio", "torch", "soundfile", "PyYAML"):
         try:
             version = importlib.metadata.version(distribution)
@@ -897,11 +919,11 @@ def build_parser() -> argparse.ArgumentParser:
         "(default: what the job was last rendered with)",
     )
     render.add_argument(
-        "--no-mark-uncertain",
-        dest="mark_uncertain",
-        action="store_false",
+        "--mark-uncertain",
+        action=argparse.BooleanOptionalAction,
         default=None,
-        help="Do not mark turns whose speaker attribution is unconfirmed",
+        help="Mark turns whose speaker attribution is unconfirmed "
+        "(default: what the job was last rendered with)",
     )
     return parser
 
