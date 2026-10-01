@@ -30,7 +30,13 @@ from .diarize import (
     load_diarization,
     preload_model,
 )
-from .gigastt import GigaSTTError, load_transcript, transcribe
+from .gigastt import (
+    GigaSTTError,
+    gigastt_version,
+    load_transcript,
+    punctuation_missing,
+    transcribe,
+)
 from .merge import merge_transcript
 from .render import DEFAULT_CUE_CHARS, DEFAULT_CUE_SECONDS, write_outputs
 
@@ -57,6 +63,15 @@ CONFIG_SCHEMA: dict[str, frozenset[str]] = {
             "subtitle_max_chars",
         }
     ),
+}
+
+
+# Stages built from another stage's product. The audio stage is absent on
+# purpose: its WAVs are a deterministic conversion under options the manifest
+# already pins, so recreating a deleted WAV must not throw away the diarization.
+STAGE_DEPENDANTS: dict[str, tuple[str, ...]] = {
+    "asr": ("merge", "render"),
+    "diarization": ("merge", "render"),
 }
 
 
@@ -117,6 +132,13 @@ def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _distribution_version(name: str) -> str | None:
+    try:
+        return importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+        return None
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -395,10 +417,24 @@ def run_pipeline(args: argparse.Namespace) -> Path:
 
     def mark(stage: str, detail: Mapping[str, Any]) -> None:
         manifest["stages"][stage] = {"completed_at": _now(), **detail}
+        if stage in recomputed:
+            # Recording a new result and retracting what was built on the old
+            # one must be a single write. Earlier, the old products on disk are
+            # still a consistent pair (the old JSON is replaced only on success)
+            # and an interrupted rerun must not make the job unrenderable; later,
+            # the manifest would vouch for a merge of a different ASR result.
+            for name in STAGE_DEPENDANTS.get(stage, ()):
+                manifest["stages"].pop(name, None)
         manifest["updated_at"] = _now()
         _atomic_json(manifest_path, manifest)
 
-    def can_reuse(stage: str, product: Path) -> bool:
+    previous_stages: Mapping[str, Any] = (previous or {}).get("stages", {})
+    # Stages recomputed in this run. Anything built on top of them is stale even
+    # if the manifest still lists it: a new ASR result under an old merge would
+    # render words that are no longer in the transcript.
+    recomputed: set[str] = set()
+
+    def can_reuse(stage: str, product: Path, *, inputs: Sequence[str] = ()) -> bool:
         """Reuse a stage only when the manifest vouches for it.
 
         Keying on the file alone would let a missing or truncated manifest slip
@@ -408,7 +444,9 @@ def run_pipeline(args: argparse.Namespace) -> Path:
 
         if args.force or previous is None:
             return False
-        return stage in previous.get("stages", {}) and product.is_file()
+        if any(stage_input in recomputed for stage_input in inputs):
+            return False
+        return stage in previous_stages and product.is_file()
 
     giga_model_dir, pyannote_cache_dir = _model_directories(args, config, base)
     print("[1/5] Preparing separate ASR and diarization audio…", flush=True)
@@ -433,11 +471,34 @@ def run_pipeline(args: argparse.Namespace) -> Path:
 
     intermediate = output_dir / "intermediate"
     asr_path = intermediate / "gigastt.json"
-    if can_reuse("asr", asr_path):
+    current_gigastt = gigastt_version(args.gigastt_exe)
+    recorded_gigastt = previous_stages.get("asr", {}).get("gigastt_version")
+    reuse_asr = can_reuse("asr", asr_path)
+    if reuse_asr and current_gigastt is None:
+        print(
+            "warning: cannot determine the GigaSTT version; reusing the ASR result "
+            f"recorded for {recorded_gigastt or 'an unknown version'} unverified.",
+            file=sys.stderr,
+            flush=True,
+        )
+    elif reuse_asr and recorded_gigastt != current_gigastt:
+        # A GigaSTT release changes the words and their timings, not only the
+        # speed, so an ASR result is only as current as the binary that made it.
+        # Diarization does not depend on it and is kept.
+        print(
+            f"[2/5] ASR was produced by GigaSTT {recorded_gigastt or '(unrecorded)'}; "
+            f"redoing it with {current_gigastt}.",
+            flush=True,
+        )
+        reuse_asr = False
+    if reuse_asr:
         print("[2/5] Reusing GigaSTT timestamps.", flush=True)
         transcript = load_transcript(asr_path)
+        asr_version = recorded_gigastt
     else:
         print("[2/5] Running GigaSTT RNNT…", flush=True)
+        recomputed.add("asr")
+        asr_version = current_gigastt
         transcript = transcribe(
             prepared.asr_path,
             asr_path,
@@ -449,24 +510,59 @@ def run_pipeline(args: argparse.Namespace) -> Path:
             vad=options["vad"],
             encoder_threads=args.encoder_threads,
         )
+    unpunctuated = punctuation_missing(transcript, options["punctuation"])
+    if unpunctuated:
+        print(
+            f"warning: punctuation was requested, but GigaSTT returned "
+            f"{len(transcript['words'])} words without a single sentence mark. The "
+            "transcript will be lowercase and unpunctuated; see intermediate/gigastt.log.",
+            file=sys.stderr,
+            flush=True,
+        )
     mark(
         "asr",
         {
             "result": "intermediate/gigastt.json",
+            "gigastt_version": asr_version,
             "words": len(transcript["words"]),
             "duration": float(
                 transcript.get("duration", transcript.get("duration_s", 0.0))
             ),
+            "punctuation_missing": unpunctuated,
         },
     )
 
     diarization_path = intermediate / "pyannote.json"
     reused_diarization = False
+    runtime = {
+        "pyannote_audio_version": _distribution_version("pyannote.audio"),
+        "torch_version": _distribution_version("torch"),
+    }
     if can_reuse("diarization", diarization_path):
         print("[3/5] Reusing pyannote diarization.", flush=True)
         diarization_result = load_diarization(diarization_path)
         reused_diarization = True
+        recorded_runtime = {
+            key: previous_stages.get("diarization", {}).get(key) for key in runtime
+        }
+        changed = [
+            f"{key.removesuffix('_version')} {recorded_runtime[key]} -> {runtime[key]}"
+            for key in runtime
+            if recorded_runtime[key] and runtime[key] and recorded_runtime[key] != runtime[key]
+        ]
+        if changed:
+            # The model itself is pinned by revision, and diarization is the most
+            # expensive stage, so a library upgrade is reported, not acted on.
+            print(
+                "warning: the reused diarization was produced with "
+                + ", ".join(changed)
+                + "; use --force to redo it with the current libraries.",
+                file=sys.stderr,
+                flush=True,
+            )
+        runtime = recorded_runtime
     else:
+        recomputed.add("diarization")
         print(
             f"[3/5] Running pinned Community-1 ({options['num_speakers']} speakers)…",
             flush=True,
@@ -500,6 +596,7 @@ def run_pipeline(args: argparse.Namespace) -> Path:
             "result": "intermediate/pyannote.json",
             "model": MODEL_ID,
             "revision": MODEL_REVISION,
+            **runtime,
             "speakers": labels,
             "requested_num_speakers": options["num_speakers"],
             "speaker_count_matches_request": len(labels) == options["num_speakers"],
@@ -507,7 +604,7 @@ def run_pipeline(args: argparse.Namespace) -> Path:
     )
 
     merged_path = intermediate / "merged.json"
-    if can_reuse("merge", merged_path):
+    if can_reuse("merge", merged_path, inputs=("asr", "diarization")):
         print("[4/5] Reusing merged transcript.", flush=True)
         merged = _load_json(merged_path)
     else:
@@ -547,6 +644,9 @@ def run_pipeline(args: argparse.Namespace) -> Path:
         {
             "files": [path.relative_to(output_dir).as_posix() for path in paths],
             "speaker_names": names,
+            "mark_uncertain": mark_uncertain,
+            "subtitle_max_seconds": subtitles["max_cue_seconds"],
+            "subtitle_max_chars": subtitles["max_cue_chars"],
         },
     )
     print(f"Done: {output_dir}", flush=True)
@@ -556,32 +656,58 @@ def run_pipeline(args: argparse.Namespace) -> Path:
 def _render_job(args: argparse.Namespace) -> Path:
     job = Path(args.job_dir).expanduser().resolve()
     merged_path = job / "intermediate" / "merged.json"
-    merged = _load_json(merged_path)
     manifest_path = job / "manifest.json"
     manifest = _load_json(manifest_path) if manifest_path.is_file() else {}
+    if manifest and "merge" not in manifest.get("stages", {}):
+        # A run that redid recognition or diarization retracts the merge before
+        # rebuilding it; if it was interrupted, merged.json still holds the old
+        # words and rendering it would publish a transcript nothing vouches for.
+        raise PipelineError(
+            "The manifest does not vouch for intermediate/merged.json (an interrupted "
+            "run redid recognition or diarization). Finish it with the run command first."
+        )
+    merged = _load_json(merged_path)
     names = _speaker_names(
         args.speaker_map, args.speaker_name, known=merged.get("speakers", [])
     )
+    previous = manifest.get("stages", {}).get("render", {})
     previous_formats = ",".join(
-        Path(item).suffix.lstrip(".")
-        for item in manifest.get("stages", {}).get("render", {}).get("files", [])
+        Path(item).suffix.lstrip(".") for item in previous.get("files", [])
     )
     formats = _formats(args.formats or previous_formats or None, {})
+
+    # Renaming speakers must not quietly re-cut the subtitles: whatever the run
+    # was rendered with stays in force unless the command line says otherwise.
+    def setting(value: Any, key: str, default: Any) -> Any:
+        if value is not None:
+            return value
+        return previous.get(key, default)
+
+    mark_uncertain = bool(setting(args.mark_uncertain, "mark_uncertain", True))
+    max_cue_seconds = float(
+        setting(args.subtitle_max_seconds, "subtitle_max_seconds", DEFAULT_CUE_SECONDS)
+    )
+    max_cue_chars = int(
+        setting(args.subtitle_max_chars, "subtitle_max_chars", DEFAULT_CUE_CHARS)
+    )
     paths = write_outputs(
         merged,
         job,
         stem=args.output_stem,
         formats=formats,
         names=names,
-        mark_uncertain=args.mark_uncertain,
-        max_cue_seconds=args.subtitle_max_seconds,
-        max_cue_chars=args.subtitle_max_chars,
+        mark_uncertain=mark_uncertain,
+        max_cue_seconds=max_cue_seconds,
+        max_cue_chars=max_cue_chars,
     )
     if manifest:
         manifest.setdefault("stages", {})["render"] = {
             "completed_at": _now(),
             "files": [path.relative_to(job).as_posix() for path in paths],
             "speaker_names": names,
+            "mark_uncertain": mark_uncertain,
+            "subtitle_max_seconds": max_cue_seconds,
+            "subtitle_max_chars": max_cue_chars,
         }
         manifest["updated_at"] = _now()
         _atomic_json(manifest_path, manifest)
@@ -589,8 +715,77 @@ def _render_job(args: argparse.Namespace) -> Path:
     return job
 
 
+# Files a run needs from the GigaSTT model directory. With GIGASTT_OFFLINE set
+# (run.ps1 sets it) a missing one is a failed run, not a download.
+# Only the shipped defaults are listed; another model_variant is not checked.
+GIGASTT_RNNT_FILES = (
+    "v3_rnnt_encoder_int8.onnx",
+    "v3_rnnt_decoder.onnx",
+    "v3_rnnt_joint.onnx",
+    "v3_vocab.txt",
+)
+GIGASTT_PUNCTUATION_FILES = (
+    "punct/rupunct_small_int8.onnx",
+    "punct/tokenizer.json",
+    "punct/config.json",
+)
+GIGASTT_VAD_FILES = ("vad/silero_vad.onnx",)
+GIGASTT_MODEL_FILES = GIGASTT_RNNT_FILES + GIGASTT_PUNCTUATION_FILES + GIGASTT_VAD_FILES
+
+
+def _pinned_gigastt_version(base: Path | None) -> str | None:
+    if base is None:
+        return None
+    lock = base / "tools" / "tools.lock.json"
+    if not lock.is_file():
+        return None
+    version = _load_json(lock).get("gigastt", {}).get("version")
+    return str(version) if version else None
+
+
+def _model_checks(
+    args: argparse.Namespace,
+    config: Mapping[str, Any],
+    base: Path | None,
+    options: Mapping[str, Any],
+) -> list[tuple[str, bool, str]]:
+    checks: list[tuple[str, bool, str]] = []
+    giga_dir, pyannote_dir = _model_directories(args, config, base)
+    required: list[str] = []
+    if options["model_variant"] == "rnnt":
+        required += GIGASTT_RNNT_FILES
+    if options["punctuation"] != "off":
+        required += GIGASTT_PUNCTUATION_FILES
+    if options["vad"]:
+        required += GIGASTT_VAD_FILES
+    if giga_dir is not None and required:
+        missing = [name for name in required if not (giga_dir / name).is_file()]
+        checks.append(
+            (
+                "GigaSTT models",
+                not missing,
+                str(giga_dir) if not missing else "missing " + ", ".join(missing),
+            )
+        )
+    if pyannote_dir is not None:
+        repository = "models--" + MODEL_ID.replace("/", "--")
+        snapshot = pyannote_dir / repository / "snapshots" / MODEL_REVISION
+        present = (snapshot / "config.yaml").is_file()
+        checks.append(
+            (
+                "pyannote model",
+                present,
+                f"{MODEL_ID}@{MODEL_REVISION[:12]}"
+                if present
+                else f"revision {MODEL_REVISION[:12]} not in {pyannote_dir}",
+            )
+        )
+    return checks
+
+
 def _doctor(args: argparse.Namespace) -> int:
-    config, _ = _load_config(args.config)
+    config, config_path = _load_config(args.config)
+    base = _project_root(config_path)
     # Validate the pin and relevant scalar configuration.
     probe_args = argparse.Namespace(
         num_speakers=None,
@@ -604,7 +799,7 @@ def _doctor(args: argparse.Namespace) -> int:
         torch_threads=DEFAULT_TORCH_THREADS,
         torch_interop_threads=DEFAULT_TORCH_INTEROP_THREADS,
     )
-    _resolved_run_options(probe_args, config)
+    options = _resolved_run_options(probe_args, config)
     checks: list[tuple[str, bool, str]] = []
     for executable in ("ffmpeg", "ffprobe"):
         location = shutil.which(executable)
@@ -612,6 +807,15 @@ def _doctor(args: argparse.Namespace) -> int:
     giga = Path(args.gigastt_exe).expanduser()
     giga_location = str(giga.resolve()) if giga.is_file() else shutil.which(args.gigastt_exe)
     checks.append(("gigastt", bool(giga_location), giga_location or "not found"))
+    if giga_location:
+        found = gigastt_version(giga_location)
+        pinned = _pinned_gigastt_version(base)
+        matches = found is not None and (pinned is None or found == pinned)
+        detail = found or "version unknown"
+        if pinned and found != pinned:
+            detail += f" (tools.lock.json pins {pinned}; run download-models.ps1)"
+        checks.append(("gigastt version", matches, detail))
+    checks.extend(_model_checks(args, config, base, options))
     for distribution in ("pyannote.audio", "torch", "soundfile", "PyYAML"):
         try:
             version = importlib.metadata.version(distribution)
@@ -688,7 +892,7 @@ def build_parser() -> argparse.ArgumentParser:
     doctor = commands.add_parser("doctor", help="Check the local runtime without inference")
     doctor.add_argument("--config")
     doctor.add_argument("--gigastt-exe", default="gigastt")
-    doctor.add_argument("--model-dir")  # accepted for wrapper/API stability
+    doctor.add_argument("--model-dir", help="GigaSTT model directory to check")
 
     render = commands.add_parser("render", help="Rerender merged JSON without inference")
     render.add_argument("--job-dir", required=True)
@@ -699,20 +903,21 @@ def build_parser() -> argparse.ArgumentParser:
     render.add_argument(
         "--subtitle-max-seconds",
         type=float,
-        default=DEFAULT_CUE_SECONDS,
-        help="Longest subtitle cue; 0 disables splitting by time",
+        help="Longest subtitle cue; 0 disables splitting by time "
+        "(default: what the job was last rendered with)",
     )
     render.add_argument(
         "--subtitle-max-chars",
         type=int,
-        default=DEFAULT_CUE_CHARS,
-        help="Longest subtitle cue in characters; 0 disables splitting by length",
+        help="Longest subtitle cue in characters; 0 disables splitting by length "
+        "(default: what the job was last rendered with)",
     )
     render.add_argument(
-        "--no-mark-uncertain",
-        dest="mark_uncertain",
-        action="store_false",
-        help="Do not mark turns whose speaker attribution is unconfirmed",
+        "--mark-uncertain",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Mark turns whose speaker attribution is unconfirmed "
+        "(default: what the job was last rendered with)",
     )
     return parser
 

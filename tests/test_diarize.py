@@ -114,3 +114,21 @@ def test_matching_speaker_count_is_silent(tmp_path, monkeypatch, capsys):
 
     assert payload["speaker_count_matches_request"] is True
     assert capsys.readouterr().err == ""
+
+
+def test_telemetry_stays_off_even_if_the_shell_turned_it_on():
+    import os
+    import subprocess
+    import sys
+
+    # A fresh interpreter: reloading the module here would replace the exception
+    # classes other modules already imported from it.
+    env = dict(os.environ, PYANNOTE_METRICS_ENABLED="1", HF_HUB_DISABLE_TELEMETRY="0")
+    script = (
+        "import os, fourvoices.diarize; "
+        "print(os.environ['PYANNOTE_METRICS_ENABLED'], os.environ['HF_HUB_DISABLE_TELEMETRY'])"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", script], env=env, capture_output=True, text=True, check=True
+    )
+    assert completed.stdout.split() == ["0", "1"]
