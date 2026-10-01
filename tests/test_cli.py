@@ -525,3 +525,83 @@ def test_rerender_flags_still_override_the_recorded_settings(pipeline):
 
     stage = read_manifest(job)["stages"]["render"]
     assert (stage["subtitle_max_seconds"], stage["mark_uncertain"]) == (0.0, False)
+
+
+# ------------------------------------------------------------------- doctor
+
+
+@pytest.fixture
+def installed(tmp_path, monkeypatch):
+    """A project with every model on disk and a pinned GigaSTT."""
+
+    project = tmp_path / "project"
+    (project / "config").mkdir(parents=True)
+    (project / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+    (project / "tools").mkdir()
+    (project / "tools" / "tools.lock.json").write_text(
+        json.dumps({"gigastt": {"version": "2.21.0"}}), encoding="utf-8"
+    )
+    config = write_config(
+        project / "config" / "default.yaml",
+        "asr:\n  model_dir: models/gigastt\ndiarization:\n  model_dir: models/pyannote\n",
+    )
+    giga = project / "models" / "gigastt"
+    for name in cli.GIGASTT_MODEL_FILES:
+        (giga / name).parent.mkdir(parents=True, exist_ok=True)
+        (giga / name).write_bytes(b"x")
+    snapshot = (
+        project / "models" / "pyannote" / "models--pyannote--speaker-diarization-community-1"
+        / "snapshots" / cli.MODEL_REVISION
+    )
+    snapshot.mkdir(parents=True)
+    (snapshot / "config.yaml").write_text("pipeline: {}\n", encoding="utf-8")
+    exe = project / "gigastt.exe"
+    exe.write_bytes(b"MZ")
+    versions = {"gigastt": "2.21.0"}
+    monkeypatch.setattr(cli, "gigastt_version", lambda executable: versions["gigastt"])
+    monkeypatch.setattr(cli.shutil, "which", lambda name: f"C:/bin/{name}.exe")
+    monkeypatch.setenv("HF_TOKEN", "hf_" + "a" * 30)
+    return project, config, exe, versions
+
+
+def doctor(config, exe):
+    args = cli.build_parser().parse_args(
+        ["doctor", "--config", str(config), "--gigastt-exe", str(exe)]
+    )
+    return cli._doctor(args)
+
+
+def test_doctor_passes_when_everything_is_in_place(installed, capsys):
+    _, config, exe, _ = installed
+    assert doctor(config, exe) == 0
+    assert "[FAIL]" not in capsys.readouterr().out
+
+
+def test_doctor_notices_a_missing_punctuation_model(installed, capsys):
+    project, config, exe, _ = installed
+    (project / "models" / "gigastt" / "punct" / "rupunct_small_int8.onnx").unlink()
+
+    assert doctor(config, exe) == 2
+    assert "[FAIL] GigaSTT models: missing punct/rupunct_small_int8.onnx" in (
+        capsys.readouterr().out
+    )
+
+
+def test_doctor_notices_an_unpinned_pyannote_revision(installed, capsys):
+    project, config, exe, _ = installed
+    snapshots = (
+        project / "models" / "pyannote" / "models--pyannote--speaker-diarization-community-1"
+        / "snapshots"
+    )
+    (snapshots / cli.MODEL_REVISION).rename(snapshots / ("0" * 40))
+
+    assert doctor(config, exe) == 2
+    assert "[FAIL] pyannote model" in capsys.readouterr().out
+
+
+def test_doctor_notices_a_gigastt_that_does_not_match_the_lock(installed, capsys):
+    _, config, exe, versions = installed
+    versions["gigastt"] = "2.15.0"
+
+    assert doctor(config, exe) == 2
+    assert "tools.lock.json pins 2.21.0" in capsys.readouterr().out

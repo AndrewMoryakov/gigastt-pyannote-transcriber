@@ -713,8 +713,63 @@ def _render_job(args: argparse.Namespace) -> Path:
     return job
 
 
+# Files a run needs from the GigaSTT model directory. With GIGASTT_OFFLINE set
+# (run.ps1 sets it) a missing one is a failed run, not a download.
+GIGASTT_MODEL_FILES = (
+    "v3_rnnt_encoder_int8.onnx",
+    "v3_rnnt_decoder.onnx",
+    "v3_rnnt_joint.onnx",
+    "v3_vocab.txt",
+    "punct/rupunct_small_int8.onnx",
+    "punct/tokenizer.json",
+    "punct/config.json",
+    "vad/silero_vad.onnx",
+)
+
+
+def _pinned_gigastt_version(base: Path | None) -> str | None:
+    if base is None:
+        return None
+    lock = base / "tools" / "tools.lock.json"
+    if not lock.is_file():
+        return None
+    version = _load_json(lock).get("gigastt", {}).get("version")
+    return str(version) if version else None
+
+
+def _model_checks(
+    args: argparse.Namespace, config: Mapping[str, Any], base: Path | None
+) -> list[tuple[str, bool, str]]:
+    checks: list[tuple[str, bool, str]] = []
+    giga_dir, pyannote_dir = _model_directories(args, config, base)
+    if giga_dir is not None:
+        missing = [name for name in GIGASTT_MODEL_FILES if not (giga_dir / name).is_file()]
+        checks.append(
+            (
+                "GigaSTT models",
+                not missing,
+                str(giga_dir) if not missing else "missing " + ", ".join(missing),
+            )
+        )
+    if pyannote_dir is not None:
+        repository = "models--" + MODEL_ID.replace("/", "--")
+        snapshot = pyannote_dir / repository / "snapshots" / MODEL_REVISION
+        present = (snapshot / "config.yaml").is_file()
+        checks.append(
+            (
+                "pyannote model",
+                present,
+                f"{MODEL_ID}@{MODEL_REVISION[:12]}"
+                if present
+                else f"revision {MODEL_REVISION[:12]} not in {pyannote_dir}",
+            )
+        )
+    return checks
+
+
 def _doctor(args: argparse.Namespace) -> int:
-    config, _ = _load_config(args.config)
+    config, config_path = _load_config(args.config)
+    base = _project_root(config_path)
     # Validate the pin and relevant scalar configuration.
     probe_args = argparse.Namespace(
         num_speakers=None,
@@ -736,6 +791,15 @@ def _doctor(args: argparse.Namespace) -> int:
     giga = Path(args.gigastt_exe).expanduser()
     giga_location = str(giga.resolve()) if giga.is_file() else shutil.which(args.gigastt_exe)
     checks.append(("gigastt", bool(giga_location), giga_location or "not found"))
+    if giga_location:
+        found = gigastt_version(giga_location)
+        pinned = _pinned_gigastt_version(base)
+        matches = found is not None and (pinned is None or found == pinned)
+        detail = found or "version unknown"
+        if pinned and found != pinned:
+            detail += f" (tools.lock.json pins {pinned}; run download-models.ps1)"
+        checks.append(("gigastt version", matches, detail))
+    checks.extend(_model_checks(args, config, base))
     for distribution in ("pyannote.audio", "torch", "soundfile", "PyYAML"):
         try:
             version = importlib.metadata.version(distribution)
@@ -812,7 +876,7 @@ def build_parser() -> argparse.ArgumentParser:
     doctor = commands.add_parser("doctor", help="Check the local runtime without inference")
     doctor.add_argument("--config")
     doctor.add_argument("--gigastt-exe", default="gigastt")
-    doctor.add_argument("--model-dir")  # accepted for wrapper/API stability
+    doctor.add_argument("--model-dir", help="GigaSTT model directory to check")
 
     render = commands.add_parser("render", help="Rerender merged JSON without inference")
     render.add_argument("--job-dir", required=True)
