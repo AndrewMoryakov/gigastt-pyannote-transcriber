@@ -1,6 +1,6 @@
 <p align="center"><img src="docs/assets/gigastt-pyannote-transcriber-hero.png" alt="gigastt-pyannote-transcriber: two people talk, a speech-to-text stenographer writes down words with timestamps, a speaker tagger assigns each word to a speaker, and a who-said-what transcript comes out" width="100%"></p>
 <h1 align="center">gigastt-pyannote-transcriber</h1>
-<p align="center"><b>Russian recording in, who-said-what transcript out — a local, CPU-only pipeline (GigaSTT + pyannote) for multi-speaker conversations you will have to quote and check by ear.</b></p>
+<p align="center"><b>Russian recording in, who-said-what transcript out — a local, CPU-only Windows toolkit (GigaSTT + pyannote) with resumable jobs, five output formats, hand-assigned speaker names and pinned, hygiene-checked tooling, for multi-speaker conversations you will have to quote and check by ear.</b></p>
 <p align="center">
   <a href="pyproject.toml"><img alt="Python 3.11" src="https://img.shields.io/badge/Python-3.11-3776AB.svg?logo=python&logoColor=white"></a>
   <a href="#requirements"><img alt="Platform: Windows 10/11 x64" src="https://img.shields.io/badge/Platform-Windows%2010%2F11%20x64-0078D6.svg?logo=windows&logoColor=white"></a>
@@ -16,26 +16,90 @@
 
 **Fourvoices: GigaSTT + pyannote for four voices.** A local, CPU-only pipeline for Russian-language recordings: **GigaSTT 2.15.0 / GigaAM v3 RNNT** recognises the words and their timings, **pyannote Community-1** says who spoke when, and the `fourvoices` Python package aligns the two in time. (The package and CLI are called `fourvoices`; the repository is `gigastt-pyannote-transcriber`.) Source audio, models, tokens and results are deliberately kept out of Git.
 
-## Why gigastt-pyannote-transcriber?
+Around that core the repository ships seven PowerShell scripts (install, download and verify models, doctor, run, re-render, test, repository hygiene), a four-command CLI (`run`, `render`, `diarize-preload`, `doctor`), a schema-validated configuration file, resumable job directories with a manifest, a speaker-map re-render step that needs no inference, and a pytest suite with a Windows CI workflow.
 
-- **If** you have a Russian-language recording of several people talking (an interview, a meeting, a call) and need to know **who said what**, **then** this turns one audio file into a transcript with a speaker label on every turn.
-- **If** you want it on your own machine with no GPU, **then** it is a CPU-only pipeline for Windows 10/11 x64; any CPU works, a slower one is simply slower.
-- **If** you will have to quote the result and check it by ear, **then** it keeps real word timings, flags overlapping speech and uncertain attribution instead of hiding them, never guesses people's names, and pins the GigaSTT executable by URL + SHA-256 and the pyannote model by git revision.
-- **If** re-running should not waste hours, **then** finished stages are resumed from disk and changed settings stop the run instead of being silently mixed.
+It is version 0.1.0 and Windows-only. It needs a Hugging Face account and read token (`HF_TOKEN` is required for every transcription run), and only the GigaSTT executable and the pyannote revision are pinned — see [Status and known limits](#status-and-known-limits).
 
-**Honest caveats.** It is built around four-person conversations on a single microphone (`num_speakers: 4` by default; `-NumSpeakers 3` and so on to change). It needs a **Hugging Face account and a read token** — the pyannote model is gated, and `HF_TOKEN` is required for every transcription run, not only for downloading. The first install needs the network and roughly 10 GB. It is not a hosted service and not a GPU pipeline (the pinned PyTorch build is CPU-only). Automatic transcription is not a guarantee of verbatim accuracy — see the closing note below.
+**Contents:** [In plain words](#in-plain-words) · [What's inside](#whats-inside) · [How it works](#how-it-works) · [Quick start](#quick-start) · [Run checklist](#run-checklist) · [Requirements](#requirements) · [Hugging Face access](#one-time-access-to-the-gated-hugging-face-model) · [Setup on a clean machine](#quick-start-on-a-clean-windows-machine) · [Job directory](#what-a-job-directory-contains) · [Speaker names](#assigning-speakers-by-hand) · [Audio processing](#how-the-audio-is-processed) · [Why these defaults](#why-the-defaults-are-what-they-are) · [Markers](#what-gets-marked-in-the-transcript) · [Subtitles](#subtitles) · [How words get a speaker](#how-words-get-a-speaker) · [Output files](#output-files-in-detail) · [Configuration](#configuration-reference) · [Command reference](#command-reference) · [Security](#security-and-reproducibility) · [Troubleshooting](#troubleshooting) · [Status](#status-and-known-limits) · [Docs map](#documentation-map)
 
-The transcripts themselves are Russian, so the markers inside them (`перекрытие речи`, `спикер под вопросом`) are Russian too. This document is the reference for operating the pipeline, not a description of its output language.
+## In plain words
 
-## Features
+### The problem
 
-- **Words with timings, then speakers** — GigaSTT (RNNT) gives per-word timestamps; pyannote gives exclusive diarization; every word is assigned a speaker by time.
-- **Five output formats** — JSON, Markdown, plain text, SRT and VTT from one run; subtitles are split on word boundaries with real timings.
-- **Honest uncertainty** — `[перекрытие речи]` for overlapping speech and `[спикер под вопросом]` for doubtful attribution mark where to listen again.
-- **Two audio copies from one source** — a near-original one for diarization, a gently filtered one for recognition; the original file is never modified.
-- **Resumable, reproducible jobs** — a manifest vouches for each finished stage; changing an option that affects the result requires `--force`.
-- **Hand-assigned names** — fill in a speaker map after listening and re-render without any inference.
-- **Pinned where it can be** — the GigaSTT executable by URL and SHA-256, pyannote by full git revision (the GigaAM RNNT, punctuation and VAD weights fetched by `gigastt` are not hash-pinned yet); repo-hygiene checks keep audio, tokens and models out of Git.
+You have a recording of several people talking in Russian — an interview, a meeting, a phone call — and you need to know not only *what* was said but *who* said it, with times, in a form you can quote. Ordinary speech-to-text gives one block of text with no speakers. Splitting by speaker is a second, separate job, and the two results have to be lined up in time. Doing this in the cloud means uploading the recording; doing it locally means installing several models and tools that need to fit together, and a re-run after a small change should not cost hours.
+
+### Who it is for
+
+People who work with Russian-language, multi-speaker audio on a Windows PC and need a checkable result: journalists and researchers transcribing interviews, people documenting meetings or calls. The defaults are tuned for a four-person conversation on one microphone. Advanced users get the full CLI, a per-key configuration, a documented merge algorithm and structured JSON for their own tooling.
+
+### What you get
+
+- **A who-said-what transcript** from one audio file: every turn carries a speaker label and a time range; formats are Markdown, plain text, SRT, VTT and JSON.
+- **Honest uncertainty.** Overlapping speech and doubtful speaker attribution are marked in the text instead of being hidden, so you know where to listen again.
+- **Local processing.** Recognition and diarization run on your own CPU, with no GPU. The network is needed to install and to download the models; transcription itself runs from the local model files.
+- **Nothing silently mixed.** A manifest records which stages are done; a re-run reuses finished stages, and changing an option that affects the result stops the run until you confirm with `--force`.
+- **Names only when you decide.** Labels such as `SPEAKER_00` become names in the Markdown, text, SRT and VTT files only through a speaker map you fill in after listening; `transcript.json` always keeps the original `SPEAKER_nn` labels, and the pipeline never guesses names.
+- **Guarded repository.** Audio, tokens and models are git-ignored and checked by a hygiene script; the GigaSTT download is verified by SHA-256 before it is unpacked or run.
+
+### What it is not
+
+- Not a hosted service and not a GPU pipeline: the pinned PyTorch build is CPU-only.
+- Not for other languages or platforms: the recognition model is Russian, the scripts are PowerShell for Windows 10/11 x64, and CI runs only on Windows.
+- Not a guarantee of verbatim accuracy: always check quotes by ear against the original recording.
+- Not automatic speaker naming: labels are never turned into names for you.
+- Not a stereo-channel separator: multichannel input stops the run unless you explicitly allow downmixing.
+- Not fully hash-pinned: the RNNT, punctuation and VAD weights fetched by `gigastt` are not pinned by hash.
+- Not offline from the first minute: install and model download need the network and about 10 GB, plus a Hugging Face account for the gated pyannote model.
+
+### Glossary
+
+| Term | Meaning here |
+|---|---|
+| **ASR / GigaSTT** | Automatic speech recognition. GigaSTT is the command-line program (a pinned release) that runs the GigaAM v3 RNNT model and returns words with start and end times. |
+| **Diarization / pyannote Community-1** | Working out *who spoke when*. Community-1 is the pyannote model used, fetched from Hugging Face at a pinned revision. |
+| **Exclusive diarization** | A pyannote output in which at most one speaker is active at any moment; words are assigned against it. The regular output (which allows overlaps) is used to detect simultaneous speech. |
+| **Speaker label** | A cluster name such as `SPEAKER_00`, or `UNKNOWN` for a word no segment could be attributed to. |
+| **Turn** | A run of consecutive words by one speaker, split when the silence between words exceeds `max_turn_gap`. |
+| **Job directory** | The folder for one recording, named after the file name and the first 12 characters of the audio's SHA-256. |
+| **Manifest** | `manifest.json` in the job directory: the input fingerprint, the options used and which stages finished. |
+| **Speaker map** | A small YAML file mapping `SPEAKER_00` and so on to names you choose after listening. It is applied to the Markdown, text, SRT and VTT files, not to the JSON. |
+| **Gated model / `HF_TOKEN`** | The pyannote model requires you to accept its conditions on Hugging Face; a read token proves it and is needed on every transcription run. |
+| **ITN** | Inverse text normalisation: spoken numbers written as digits ("двадцать три" → "23"). |
+
+## What's inside
+
+Status labels: everything listed here is implemented in this repository; nothing is labelled experimental or planned in the code or docs. The last subsection lists what is not built.
+
+### The transcription pipeline
+
+- **Audio preparation.** One recording becomes two 16 kHz mono WAV files: a near-original one for diarization and a gently filtered one for recognition. The source file is never modified; multichannel input is refused unless you allow downmixing. → [How the audio is processed](#how-the-audio-is-processed)
+- **Recognition.** The pinned GigaSTT executable produces words with start and end times, optional punctuation, number normalisation and voice-activity detection. → [Why these defaults](#why-the-defaults-are-what-they-are)
+- **Diarization.** pyannote Community-1 at a pinned revision, with the speaker count given (default 4). A count mismatch is saved and warned about, or refused with `-StrictSpeakers`. → [Why these defaults](#why-the-defaults-are-what-they-are)
+- **Merge.** Each word gets the speaker with the greatest overlap; gaps fall back to the nearest segment or `UNKNOWN`; overlap and uncertainty are recorded; words are grouped into turns. → [How words get a speaker](#how-words-get-a-speaker)
+- **Rendering.** Markdown, TXT, SRT, VTT and JSON from one run; subtitles are cut on word boundaries with real timings. → [Output files](#output-files-in-detail)
+
+### Reliability and reproducibility
+
+- **Resumable jobs.** Finished stages are read back from disk only when the manifest vouches for them; an interrupted run continues from the last completed stage. → [What a job directory contains](#what-a-job-directory-contains)
+- **Refusal instead of mixing.** A changed result-affecting option, or a different input in the same job directory, stops the run unless `--force` is given. → [What a job directory contains](#what-a-job-directory-contains)
+- **Pins.** GigaSTT executable by URL and SHA-256; pyannote by full git revision; the CLI rejects a configuration that asks for another model or revision. → [Security and reproducibility](#security-and-reproducibility)
+- **Strict configuration.** Unknown sections and keys are rejected, so a typo cannot look like a setting. → [Configuration reference](#configuration-reference)
+
+### Working with the result
+
+- **Hand-assigned names.** Fill in a speaker map after listening and re-render without any inference; the names appear in Markdown, text, SRT and VTT, while the JSON keeps the labels. → [Assigning speakers by hand](#assigning-speakers-by-hand)
+- **Markers.** `[перекрытие речи]` for overlapping speech and `[спикер под вопросом]` for doubtful attribution. → [What gets marked](#what-gets-marked-in-the-transcript)
+- **Structured JSON.** The merged JSON carries every word with its speaker, evidence and flags, plus the turns. → [Output files](#output-files-in-detail)
+
+### Tooling around the pipeline
+
+- **Seven PowerShell scripts.** `install`, `download-models`, `doctor`, `run`, `rerender`, `test` and `check-repo-hygiene`. → [Command reference](#command-reference)
+- **A four-command CLI.** `run`, `render`, `diarize-preload` and `doctor`, with options the scripts do not expose (for example `--force`). → [Command reference](#command-reference)
+- **Repository hygiene and tests.** A script that fails if audio, models, tokens or secrets are tracked, a pytest suite, ruff, and a Windows CI workflow. → [Status and known limits](#status-and-known-limits)
+
+### Not built
+
+Other languages, GPU/CUDA, Linux or macOS scripts, parallel processing of several files, streaming/real-time use, automatic naming of speakers and stereo-channel-aware diarization are not part of this repository. See [What it is not](#what-it-is-not) and [Status and known limits](#status-and-known-limits).
 
 ## How it works
 
@@ -47,7 +111,17 @@ The transcripts themselves are Russian, so the markers inside them (`перек�
 2. **Recognise the words.** GigaSTT (RNNT) produces words with start and end times.
 3. **Find the speakers.** pyannote Community-1 is given `num_speakers=4` and produces an exclusive diarization.
 4. **Align by time.** `fourvoices` gives each word a speaker, marks overlap and uncertain attribution, and writes the transcript in five formats.
-5. **Name the speakers yourself.** Listen to long turns from each cluster, fill in a speaker map, and re-render — labels are never turned into names automatically.
+5. **Name the speakers yourself.** Listen to long turns from each cluster, fill in a speaker map, and re-render — labels are never turned into names automatically. The names go into the Markdown, text, SRT and VTT files; the JSON keeps the labels.
+
+The CLI prints the five stages as it goes, and each stage leaves a file and a manifest entry:
+
+| Stage | Printed as | Writes | Manifest key |
+|---|---|---|---|
+| 1 | `[1/5] Preparing separate ASR and diarization audio…` | `audio/asr.wav`, `audio/diarization.wav` | `audio` |
+| 2 | `[2/5] Running GigaSTT RNNT…` (or `Reusing GigaSTT timestamps.`) | `intermediate/gigastt.json` | `asr` |
+| 3 | `[3/5] Running pinned Community-1 (N speakers)…` (or `Reusing pyannote diarization.`) | `intermediate/pyannote.json` | `diarization` |
+| 4 | `[4/5] Assigning words by exclusive maximum overlap…` (or `Reusing merged transcript.`) | `intermediate/merged.json` | `merge` |
+| 5 | `[5/5] Rendering …` | `transcript.{md,txt,srt,vtt,json}` | `render` |
 
 ## Quick start
 
@@ -246,6 +320,13 @@ fragments. A label that does not exist in the transcript renames nobody, and
 the run says so instead of pretending the rename worked. Interruptions and
 simultaneous speech need manual proofreading regardless of the model.
 
+The map is applied only while the Markdown, text, SRT and VTT files are
+rendered. `transcript.json` is the merged data written unchanged, so after a
+re-render its `speakers`, `turns` and `words` still carry `SPEAKER_00` and so
+on; a tool that reads the JSON has to apply the same label-to-name mapping
+itself. The names that were applied are recorded in the `render` stage of
+`manifest.json` (`speaker_names`).
+
 ## How the audio is processed
 
 - pyannote gets a near-original version: mono, 16 kHz, no aggressive noise
@@ -360,6 +441,8 @@ rebuild. In `run.ps1` a value of `0` means "let fourvoices decide".
 
 ## What gets marked in the transcript
 
+The transcripts themselves are Russian, so the markers inside them (`перекрытие речи`, `спикер под вопросом`) are Russian too; this document describes how to operate the pipeline, not its output language.
+
 - `[перекрытие речи]` ("overlapping speech") — according to the regular
   diarization, two people are speaking during this interval.
 - `[спикер под вопросом]` ("speaker in question") — at least half of the turn's
@@ -384,10 +467,119 @@ The limits come from the `output.subtitle_max_seconds` and
 corresponding limit. If `merged.json` carries no per-word timings, the turn is
 left as a single cue — a wrong timestamp is worse than a long subtitle.
 
+## How words get a speaker
+
+This is the merge step (`src/fourvoices/merge.py`). It works on the words GigaSTT returned and on the two annotations pyannote saved to `intermediate/pyannote.json`: the *exclusive* segments (one speaker at a time) and the *regular* segments (overlaps allowed).
+
+1. **Greatest overlap wins.** For each word, the time it shares with each speaker's exclusive segments is added up; the speaker with the most wins. A zero-length word is treated as a tiny interval. Equal totals mark the word `ambiguous`.
+2. **Gaps use the nearest segment.** If no exclusive segment covers the word, the nearest one is used when it lies within `nearest_max_gap` seconds (default 0.5); the word is recorded as assigned by `nearest`. Farther than that, the word's speaker is `UNKNOWN`.
+3. **Overlap comes from the regular annotation.** A word or turn is marked overlapping when two *different* speakers' regular segments are active at once; segments that merely touch do not count.
+4. **Words become turns.** Consecutive words by the same speaker form one turn; a new turn starts when the speaker changes or the silence between words exceeds `max_turn_gap` (default 1.5 s).
+5. **Doubtful turns are flagged.** A turn is `uncertain` when at least half of its words rest on something weaker than confirmed overlap (`nearest`, `UNKNOWN` or a tie). That is what produces the `спикер под вопросом` marker.
+6. **Display text keeps GigaSTT's punctuation where it is safe.** GigaSTT applies punctuation and number normalisation only to the top-level text and leaves each word raw. The merge projects the processed spelling back onto the timestamped words only where the normalised forms match exactly (case, edge punctuation and `ё`/`е` ignored); otherwise the raw word is kept. The share of matched words is saved as `punctuation_alignment_ratio`.
+
+Lookups use sorted indexes with binary search, so merging does not slow down quadratically with recording length; `tests/test_merge_equivalence.py` compares the indexed code with simple reference implementations.
+
+## Output files in detail
+
+All five files are written from `intermediate/merged.json`; `render` can regenerate them without inference.
+
+| File | What it contains |
+|---|---|
+| `transcript.txt` | one line per turn: `[hh:mm:ss–hh:mm:ss] Speaker [markers]: text` |
+| `transcript.md` | a heading, a short note that the text is automatic and needs checking against the audio, then each turn as a bold `[time range] Speaker · markers` line followed by its text (the heading and note are in Russian) |
+| `transcript.srt`, `transcript.vtt` | cues with real word-boundary timings; the speaker label (and markers) repeat in every cue; lines wrap at 42 characters; VTT starts with `WEBVTT` |
+| `transcript.json` | the merged JSON, see below; speaker maps do not change it, it keeps the `SPEAKER_nn` labels |
+
+**Merged JSON.** Top level: `schema_version`, `duration_s`, `speakers`, `text`, `raw_text`, `gigastt_processed_text`, `punctuation_alignment_ratio`, `words`, `turns`. Each **word** has `index`, `word`, `display_word`, `start`, `end`, `confidence`, `speaker`, `speaker_overlap_s`, `assignment` (`overlap`, `nearest` or `unknown`), `ambiguous` and `overlap`. Each **turn** has `id`, `speaker`, `start`, `end`, `text`, `raw_text`, `overlap`, `uncertain_words`, `uncertain`, `confidence` (duration-weighted word confidence), `word_start` and `word_end` (indexes into `words`). The `speaker` values are always the pipeline's `SPEAKER_nn` labels: a speaker map is not applied to this file.
+
+**Other files in a job directory.** `intermediate/gigastt.json` (validated GigaSTT output; each word needs `start` and `end`), `intermediate/pyannote.json` (model, revision, requested and found speakers, `speaker_count_matches_request`, regular and exclusive segments), and `manifest.json` (below). Files are written through a `.partial` temporary and renamed, so an interrupted write does not leave a half-written result; if GigaSTT returns JSON the program cannot use, the raw output is kept as `gigastt.json.rejected`.
+
+**The manifest.** `manifest.json` holds `schema_version`, `pipeline_version`, `created_at`, `updated_at`, the `input` fingerprint (`name`, `size_bytes`, `mtime_ns`, `sha256`; never an absolute path), the `config` that affects the result, and a `stages` map (`audio`, `asr`, `diarization`, `merge`, `render`), each with `completed_at` and stage details (for example the word count, the speaker labels found, the files rendered and the speaker names used).
+
+## Configuration reference
+
+`config/default.yaml` is read by `run` and `doctor` (`render` does not read it). Unknown sections and keys are rejected with a message listing the supported keys. Relative paths resolve against the project root (the nearest enclosing directory containing `pyproject.toml`). A command-line option, where one exists, overrides the YAML value.
+
+| Key | Default | What it does |
+|---|---|---|
+| `project.output_root` | `../gigastt-pyannote-output` | where job directories go |
+| `audio.diarization_filter` | `null` | ffmpeg `-af` filter for the diarization copy (none by default) |
+| `audio.asr_filter` | `highpass=f=80,loudnorm=I=-18:LRA=11:TP=-2` | ffmpeg filter for the recognition copy |
+| `asr.model_variant` | `rnnt` | GigaSTT model variant; must emit word timestamps |
+| `asr.model_dir` | `models/gigastt` | GigaSTT model directory |
+| `asr.punctuation`, `asr.itn` | `true` | punctuation and number normalisation (`true`/`false` or `auto`/`on`/`off`) |
+| `asr.vad` | `true` | voice-activity detection |
+| `diarization.model`, `diarization.revision` | Community-1 and its pinned revision | must equal the pinned values or the run is refused |
+| `diarization.model_dir` | `models/pyannote` | Hugging Face cache directory for the model |
+| `diarization.device` | `cpu` | the pinned PyTorch build is CPU-only |
+| `diarization.num_speakers` | `4` | number of speakers given to pyannote |
+| `merge.max_turn_gap` | `1.5` | seconds of silence that split a turn |
+| `merge.nearest_max_gap` | `0.5` | how far the nearest segment may be before a word becomes `UNKNOWN` |
+| `output.formats` | `json, md, txt, srt, vtt` | formats written |
+| `output.mark_uncertain_words` | `true` | add the `спикер под вопросом` marker |
+| `output.subtitle_max_seconds`, `output.subtitle_max_chars` | `6`, `84` | subtitle cue limits; `0` disables a limit |
+
+**What triggers `--force`.** The result-affecting options are the speaker count, both audio filters, the model variant, punctuation, ITN, VAD, the device, the two merge gaps, `--allow-downmix` and the pinned model and revision. If a manifest exists and any of them differ, `run` stops with `Inference/merge options changed; use --force to rebuild.`. PyTorch thread counts, directories and the `output.*` options do not trigger it: output options are applied in the render stage, which runs every time.
+
+**What `run.ps1` overrides.** The wrapper always passes `--output-root`, `--num-speakers` and `--model-dir` (and `--config`) explicitly. Through `run.ps1` the output directory, the speaker count and the GigaSTT model directory therefore come from the script's parameters (`-OutputRoot`, `-NumSpeakers`, default 4, and `models\gigastt`), not from `project.output_root`, `diarization.num_speakers` or `asr.model_dir` in the YAML. To use the YAML values, call the CLI directly.
+
+Environment variables read by the code: `HF_TOKEN` (or `HUGGINGFACE_TOKEN`) for pyannote; `HF_HOME` is used by the Hugging Face library and `.env.example` points it at `models/huggingface`. By default the code also sets `PYANNOTE_METRICS_ENABLED=0`, `HF_HUB_DISABLE_TELEMETRY=1` and `DO_NOT_TRACK=1` before importing pyannote; a value already present in your environment is kept.
+
+## Command reference
+
+### PowerShell scripts (`scripts/`)
+
+All scripts stop on the first error. The scripts print their own messages in Russian; the Python CLI prints English.
+
+| Script | Parameters | What it does |
+|---|---|---|
+| `install.ps1` | `-InstallFfmpeg`, `-SkipSync` | requires 64-bit Windows; installs `uv` through winget if missing; installs a managed Python 3.11; creates `.venv` and installs the pinned CPU dependencies (`uv sync`); with `-InstallFfmpeg` installs ffmpeg through winget; creates `media`, `models`, `tools\bin`, `tools\downloads` |
+| `download-models.ps1` | `-SkipGigaStt`, `-SkipPyannote`, `-Force` | downloads GigaSTT v2.15.0 for Windows x64 (up to 3 attempts), checks its SHA-256 against `tools/tools.lock.json`, unpacks it, runs `gigastt download` for RNNT INT8 (up to 3 attempts), runs a one-second silent probe so the punctuation and VAD models are fetched now, then preloads the pyannote model at the pinned revision (needs `HF_TOKEN`) |
+| `doctor.ps1` | none | checks `uv`, `ffmpeg`, `ffprobe`, the GigaSTT executable and `HF_TOKEN`, then runs the CLI doctor (below) |
+| `run.ps1` | `-InputAudio` (one or more files), `-OutputRoot`, `-Config`, `-SpeakerMap`, `-NumSpeakers` (1–32, default 4), `-AllowDownmix`, `-StrictSpeakers`, `-TorchThreads`, `-TorchInteropThreads` | processes the files one at a time, sets `GIGASTT_OFFLINE=1` and the GigaSTT punctuation/VAD model directories, and calls `fourvoices run`; has no `-Force` |
+| `rerender.ps1` | `-JobDir`, `-SpeakerMap` (both required) | calls `fourvoices render` for a finished job |
+| `test.ps1` | none | runs the hygiene check, then `ruff check src tests`, then `pytest` |
+| `check-repo-hygiene.ps1` | none | fails if audio files, `media/`, `transcripts/`, `secrets/`, `models/`, `tools/bin/`, `tools/downloads/`, `.env` files (except `.env.example`) or text resembling a Hugging Face token (`hf_` followed by 20 or more letters or digits) are tracked or not ignored |
+
+`scripts/common.ps1` holds the shared helpers (repository root, `.env` loading, `uv` invocation); it is not run directly.
+
+### The CLI
+
+The scripts call it as `uv run --python 3.11 python -m fourvoices.cli <command>`; `pyproject.toml` also declares a `fourvoices` console script. Exit codes: `0` success, `2` a reported error (`error: …` on stderr, also a failed doctor), `130` interrupted with Ctrl+C (completed stages can be resumed).
+
+| Command | Options |
+|---|---|
+| `run` | `--input` (required), `--output-root`, `--config`, `--gigastt-exe`, `--model-dir`, `--num-speakers`, `--speaker-map`, `--speaker-name LABEL=NAME` (repeatable), `--allow-downmix`, `--strict-speakers`, `--force`, `--ffmpeg`, `--ffprobe`, `--model-variant`, `--punctuation auto\|on\|off`, `--itn auto\|on\|off`, `--no-vad`, `--encoder-threads`, `--torch-threads`, `--torch-interop-threads`, `--device`, `--max-turn-gap`, `--nearest-max-gap`, `--formats`, `--output-stem` |
+| `render` | `--job-dir` (required), `--speaker-map`, `--speaker-name LABEL=NAME`, `--formats`, `--output-stem`, `--subtitle-max-seconds`, `--subtitle-max-chars`, `--no-mark-uncertain` |
+| `diarize-preload` | `--model`, `--revision`, `--model-dir` (the pinned model and revision are the only accepted values) |
+| `doctor` | `--config`, `--gigastt-exe`, `--model-dir` (accepted but not used) |
+
+Notes on the CLI:
+
+- **`render` does not read `config/default.yaml`.** Its subtitle limits default to 6 s and 84 characters and it marks doubtful turns unless you pass `--no-mark-uncertain`. Without `--formats` it re-renders the formats recorded in the job's manifest.
+- **The CLI doctor checks** that `ffmpeg`, `ffprobe` and the GigaSTT executable can be found, that `pyannote.audio`, `torch`, `soundfile` and `PyYAML` are installed (it prints their versions), that a token is set, and that the configuration and the pinned model are valid. It does not check that the model files exist, that PyTorch is the CPU build, or the executable's hash.
+- **Running the CLI directly.** `run.ps1` also sets `GIGASTT_OFFLINE=1`, `GIGASTT_PUNCT_MODEL_DIR` and `GIGASTT_VAD_MODEL_DIR` (to `models\gigastt\punct` and `models\gigastt\vad`) for the GigaSTT process and loads `.env` into the environment; when you call `fourvoices run` directly, set the same three variables yourself and make sure `HF_TOKEN` is set in the window (the Python code reads it only from the environment, never from `.env`). The example below does this.
+- **Forcing a rebuild:**
+
+```powershell
+# From the repository root. These variables last for this PowerShell window.
+# $env:HF_TOKEN must already be set (see "One-time access to the gated Hugging Face model").
+$gigaModels = (Resolve-Path .\models\gigastt).Path
+$env:GIGASTT_OFFLINE = '1'
+$env:GIGASTT_PUNCT_MODEL_DIR = Join-Path $gigaModels 'punct'
+$env:GIGASTT_VAD_MODEL_DIR = Join-Path $gigaModels 'vad'
+
+uv run --python 3.11 python -m fourvoices.cli run --input .\media\recording.m4a `
+    --output-root ..\gigastt-pyannote-output --config config\default.yaml `
+    --gigastt-exe .\tools\bin\gigastt\2.15.0\gigastt.exe --model-dir .\models\gigastt `
+    --force
+```
+
 ## Useful commands
 
 ```powershell
-# Check the environment, the token, the models and CPU PyTorch
+# Check the tools on PATH, the GigaSTT executable, the token, the configuration and the installed Python packages
 .\scripts\doctor.ps1
 
 # Linter, tests, and protection against committing audio or tokens
@@ -413,3 +605,55 @@ left as a single cue — a wrong timestamp is worse than a long subtitle.
 Automatic transcription is not a guarantee of verbatim accuracy. For quotes
 that carry legal weight, always keep the original recording and its timecodes,
 and check the words by ear.
+
+## Troubleshooting
+
+| Symptom | Likely cause | What to do |
+|---|---|---|
+| `error: Set HF_TOKEN after accepting the Community-1 model conditions on Hugging Face.` | no token in this PowerShell window (it is needed for every run, not only for downloading) | set `$env:HF_TOKEN` again, or put it into a local `.env` |
+| `Could not load Community-1. Confirm model access and HF_TOKEN.` or `Model download was denied.` | the model conditions were not accepted, or the token is wrong | accept the conditions on the model page and create a **Read** token |
+| `error: Input has 2 channels (…). Inspect/listen to the channels first …` | multichannel input is refused on purpose | listen to the channels; use `-AllowDownmix` only if mixing cannot destroy useful speaker separation |
+| `Inference/merge options changed; use --force to rebuild.` | an option that affects the result differs from the manifest | restore the option, or rebuild with `--force` through the CLI (`run.ps1` has no `-Force`) |
+| `Existing job belongs to a different input; use --force.` | a job directory with the same name holds a different file | use `--force` only if you mean to replace it |
+| `Configuration problems: unknown key '…'` | a typo or a stale key in the YAML | use one of the keys the message lists; see [Configuration reference](#configuration-reference) |
+| `This release is pinned to … the configuration requests an unreviewed artifact.` | `diarization.model` or `revision` was changed | restore the pinned values |
+| `ffmpeg is not available on PATH. Install FFmpeg and restart the shell.` | ffmpeg was just installed through winget | open a new PowerShell window, return to the repository and set the token again |
+| `Не найден GigaSTT. Запустите .\scripts\download-models.ps1.` | the executable is not downloaded yet | run `.\scripts\download-models.ps1` |
+| `SHA-256 GigaSTT не совпал…` | a damaged or substituted download | run `.\scripts\download-models.ps1 -SkipPyannote -Force` |
+| `warning: Requested 4 speakers but pyannote returned N …` | a participant stayed almost silent, or there are not four speakers | the result is saved; pass `-NumSpeakers`, or `-StrictSpeakers` to make it an error (still saved) |
+| `warning: these labels are not in the transcript and were ignored: …` | a speaker-map label does not exist in this job | use the labels the message lists |
+| `GigaSTT JSON has no 'words' array; word timestamps are required.` and a `gigastt.json.rejected` file | GigaSTT returned something this program cannot use (for example a model variant without word timestamps) | inspect the `.rejected` file; keep a variant that emits word timestamps |
+| `error: Cannot read …/manifest.json …` | a damaged manifest | fix or delete it; without a manifest the stages are recomputed rather than reused |
+| the run is very slow or uses much memory | CPU-only, and diarization loads the whole recording into memory | see [Requirements](#requirements); tune `-TorchThreads`; process files one at a time (the script already does) |
+
+## Status and known limits
+
+The package is version 0.1.0.
+
+- **Platform.** Windows 10/11 x64 only: the scripts are PowerShell and use winget; CI runs on `windows-latest`. No other platform is documented or tested.
+- **Language and speakers.** Russian speech; defaults tuned for four speakers on one microphone. The speaker count is given, not inferred.
+- **CPU only.** The pinned PyTorch build is `2.11.0+cpu`; there is no GPU path.
+- **Files are processed one at a time** by `run.ps1`, on purpose.
+- **Memory.** Diarization loads the whole recording; roughly 230 MB per hour of audio plus the model itself (see [Requirements](#requirements)).
+- **Pins are partial.** The GigaSTT executable (URL and SHA-256) and the pyannote revision are pinned; the GigaAM RNNT, punctuation and VAD weights are fetched by `gigastt` and are not hash-pinned. Dependency versions are pinned in `pyproject.toml` and `uv.lock`.
+- **Token on every run.** `HF_TOKEN` is required each time diarization runs, even when all weights are on disk.
+- **Network.** Installation and model download need the network. After that, processing is local; the code turns pyannote telemetry off by default, but a value already set in your environment wins.
+- **Accuracy.** Automatic transcription is not verbatim-accurate; overlapping speech and interruptions need manual proofreading.
+- **Tests.** A pytest suite covers the CLI and resume behaviour, diarization handling, the GigaSTT wrapper, the merge (including equivalence with reference implementations) and rendering; CI runs ruff, pytest and the hygiene check. The suites use stand-ins for the models, so a full end-to-end run on a real recording needs the real models and a token.
+- **No release process is documented**; the repository is used from a checkout.
+
+## Documentation map
+
+| Where | What it covers |
+|---|---|
+| This README | operation of the whole pipeline: setup, running, resuming, naming speakers, configuration, commands, troubleshooting |
+| [README.ru.md](README.ru.md) | Russian translation of this document (the English one is authoritative) |
+| [config/default.yaml](config/default.yaml) | every setting with comments on why it is what it is |
+| [config/speaker-map.example.yaml](config/speaker-map.example.yaml) | template for the speaker map |
+| [.env.example](.env.example) | local fallback for `HF_TOKEN` and `HF_HOME` |
+| [tools/tools.lock.json](tools/tools.lock.json) | the pinned GigaSTT release (URL, SHA-256) and pyannote revision |
+| `src/fourvoices/` | `audio.py`, `gigastt.py`, `diarize.py`, `merge.py`, `render.py`, `cli.py` |
+| `scripts/` | the PowerShell wrappers |
+| `tests/` | the pytest suite |
+| [.github/workflows/tests.yml](.github/workflows/tests.yml) | the CI workflow |
+
