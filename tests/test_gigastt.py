@@ -83,10 +83,13 @@ DEGRADED_LOG = (
 )
 
 
-def fake_gigastt(stderr="", text="тест", returncode=0):
+def fake_gigastt(log="", text="тест", returncode=0, stream="stdout"):
+    # The real binary writes its tracing log to stdout (2.15.0 and 2.21.0 both).
+    stdout, stderr = (log, "") if stream == "stdout" else ("", log)
+
     def fake_run(command, **kwargs):
         if returncode:
-            raise subprocess.CalledProcessError(returncode, command, "", stderr)
+            raise subprocess.CalledProcessError(returncode, command, stdout, stderr)
         output = command[command.index("--output") + 1]
         with open(output, "w", encoding="utf-8") as stream:
             json.dump(
@@ -97,7 +100,7 @@ def fake_gigastt(stderr="", text="тест", returncode=0):
                 },
                 stream,
             )
-        return subprocess.CompletedProcess(command, 0, "", stderr)
+        return subprocess.CompletedProcess(command, 0, stdout, stderr)
 
     return fake_run
 
@@ -187,3 +190,15 @@ def test_punctuation_is_missing_only_when_requested_and_the_text_is_long():
     assert not punctuation_missing(_payload(300, bare), "auto")
     # A short answer such as "да нет наверное" legitimately has no marks.
     assert not punctuation_missing(_payload(3, "да нет наверное"), "on")
+
+
+def test_a_log_printed_to_stderr_is_kept_as_well(tmp_path, monkeypatch, capsys):
+    source = tmp_path / "input.wav"
+    source.write_bytes(b"RIFF")
+    monkeypatch.setattr(subprocess, "run", fake_gigastt(DEGRADED_LOG, stream="stderr"))
+
+    transcribe(source, tmp_path / "gigastt.json", executable="gigastt.exe")
+
+    log = (tmp_path / "gigastt.log").read_text(encoding="utf-8")
+    assert "Punctuation restore failed" in log
+    assert "Punctuation restore failed" in capsys.readouterr().err

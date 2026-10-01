@@ -193,15 +193,17 @@ def transcribe(
             f"GigaSTT executable '{executable}' was not found on PATH."
         ) from exc
     except subprocess.CalledProcessError as exc:
-        _write_log(log_path, exc.stderr)
+        log = _process_log(exc.stdout, exc.stderr)
+        _write_log(log_path, log)
         # The log opens with model-loading chatter; the reason is at the end.
-        lines = _ANSI.sub("", exc.stderr or exc.stdout or "").strip().splitlines()
+        lines = _ANSI.sub("", log).strip().splitlines()
         detail = "\n".join(lines[-5:])
         raise GigaSTTError(
             f"GigaSTT exited with code {exc.returncode} (full log: {log_path.name}): {detail}"
         ) from exc
-    _write_log(log_path, completed.stderr)
-    problems = log_problems(completed.stderr or "")
+    log = _process_log(completed.stdout, completed.stderr)
+    _write_log(log_path, log)
+    problems = log_problems(log)
     for line in problems[:_MAX_REPORTED_PROBLEMS]:
         print(f"warning: GigaSTT: {line}", file=sys.stderr, flush=True)
     if len(problems) > _MAX_REPORTED_PROBLEMS:
@@ -232,6 +234,18 @@ def transcribe(
     finally:
         temporary.unlink(missing_ok=True)
     return payload
+
+
+def _process_log(stdout: str | None, stderr: str | None) -> str:
+    """Everything GigaSTT printed. Its `tracing` log goes to stdout, not stderr.
+
+    With ``--output`` the JSON goes to the file, so stdout carries only the log
+    (checked against 2.15.0 and 2.21.0); stderr is kept too in case a release
+    moves the log or prints a panic there.
+    """
+
+    parts = [text for text in (stdout, stderr) if text]
+    return "".join(part if part.endswith("\n") else part + "\n" for part in parts)
 
 
 def _write_log(path: Path, text: str | None) -> None:
