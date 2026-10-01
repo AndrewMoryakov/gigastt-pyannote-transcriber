@@ -610,7 +610,7 @@ def test_doctor_notices_a_gigastt_that_does_not_match_the_lock(installed, capsys
 # ------------------------------------------------ independent-review follow-ups
 
 
-def test_an_interruption_inside_asr_already_retracts_the_merge(pipeline, monkeypatch):
+def test_an_interrupted_new_asr_leaves_the_old_job_renderable(pipeline, monkeypatch):
     calls, source, config, _ = pipeline
     job = run(source, config)
     calls.gigastt_version = "2.22.0"
@@ -618,14 +618,18 @@ def test_an_interruption_inside_asr_already_retracts_the_merge(pipeline, monkeyp
     def interrupted(*args, **kwargs):
         raise KeyboardInterrupt
 
+    # E.g. Ctrl+C during a recognition the user did not expect after an upgrade.
     monkeypatch.setattr(cli, "transcribe", interrupted)
     with pytest.raises(KeyboardInterrupt):
         run(source, config)
 
     stages = read_manifest(job)["stages"]
-    assert "merge" not in stages and "render" not in stages
-    # The ASR record still describes the result on disk, so the next run redoes it.
+    # Nothing new was recorded, so the old ASR + merge pair is still consistent.
     assert stages["asr"]["gigastt_version"] == "2.21.0"
+    assert "merge" in stages
+    args = cli.build_parser().parse_args(["render", "--job-dir", str(job)])
+    cli._render_job(args)
+    assert "render" in read_manifest(job)["stages"]
 
 
 def test_render_refuses_a_merge_the_manifest_no_longer_vouches_for(pipeline, monkeypatch):

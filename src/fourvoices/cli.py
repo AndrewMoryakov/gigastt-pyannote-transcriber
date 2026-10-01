@@ -417,6 +417,14 @@ def run_pipeline(args: argparse.Namespace) -> Path:
 
     def mark(stage: str, detail: Mapping[str, Any]) -> None:
         manifest["stages"][stage] = {"completed_at": _now(), **detail}
+        if stage in recomputed:
+            # Recording a new result and retracting what was built on the old
+            # one must be a single write. Earlier, the old products on disk are
+            # still a consistent pair (the old JSON is replaced only on success)
+            # and an interrupted rerun must not make the job unrenderable; later,
+            # the manifest would vouch for a merge of a different ASR result.
+            for name in STAGE_DEPENDANTS.get(stage, ()):
+                manifest["stages"].pop(name, None)
         manifest["updated_at"] = _now()
         _atomic_json(manifest_path, manifest)
 
@@ -425,20 +433,6 @@ def run_pipeline(args: argparse.Namespace) -> Path:
     # if the manifest still lists it: a new ASR result under an old merge would
     # render words that are no longer in the transcript.
     recomputed: set[str] = set()
-
-    def recompute(stage: str) -> None:
-        """Record that ``stage`` is being redone and retract what depends on it.
-
-        The retraction is written at once, so a run interrupted before the
-        dependants are rebuilt cannot leave the manifest vouching for them.
-        """
-
-        recomputed.add(stage)
-        stale = [name for name in STAGE_DEPENDANTS.get(stage, ()) if name in manifest["stages"]]
-        for name in stale:
-            del manifest["stages"][name]
-        if stale:
-            _atomic_json(manifest_path, manifest)
 
     def can_reuse(stage: str, product: Path, *, inputs: Sequence[str] = ()) -> bool:
         """Reuse a stage only when the manifest vouches for it.
@@ -503,7 +497,7 @@ def run_pipeline(args: argparse.Namespace) -> Path:
         asr_version = recorded_gigastt
     else:
         print("[2/5] Running GigaSTT RNNT…", flush=True)
-        recompute("asr")
+        recomputed.add("asr")
         asr_version = current_gigastt
         transcript = transcribe(
             prepared.asr_path,
@@ -568,7 +562,7 @@ def run_pipeline(args: argparse.Namespace) -> Path:
             )
         runtime = recorded_runtime
     else:
-        recompute("diarization")
+        recomputed.add("diarization")
         print(
             f"[3/5] Running pinned Community-1 ({options['num_speakers']} speakers)…",
             flush=True,
