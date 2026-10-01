@@ -212,6 +212,12 @@ directory.
   transcript.{md,txt,srt,vtt,json}
 ```
 
+Recognition and diarization take minutes per hour of audio on a CPU, so both
+print progress every half minute or so: recognition counts decoded windows
+(with VAD their number is not known in advance, so it cannot be a percentage)
+and ends with its speed; diarization names each pyannote step and its share
+done. These are ordinary lines, readable in a redirected log too.
+
 Re-running the same command does not recompute finished stages: they are read
 back from `intermediate/`, but only when `manifest.json` vouches for them. A
 lost or corrupted manifest therefore causes an honest recomputation rather than
@@ -267,6 +273,50 @@ Never assign a name from a short "yes" or "mhm": use long, clearly audible
 fragments. A label that does not exist in the transcript renames nobody, and
 the run says so instead of pretending the rename worked. Interruptions and
 simultaneous speech need manual proofreading regardless of the model.
+
+## Measuring quality on your own recordings
+
+Automatic transcription has to be checked against something. `evaluate`
+compares a finished job with a reference you trust and reports two numbers:
+
+- **WER** — the share of reference words that were substituted, missed or
+  inserted, after lowercasing, `ё` → `е` and stripping punctuation;
+- **speaker accuracy** — among the words both texts share, the share given to
+  the right person. Clusters are matched to the reference names one-to-one in
+  the way that agrees with the reference most; `UNKNOWN` is never matched, so
+  it always counts as an error.
+
+The reference is a text file in the shape of `transcript.txt`: one turn per
+line, `[hh:mm:ss–hh:mm:ss] Name: text`. The timestamp is optional, markers such
+as `[перекрытие речи]` are ignored, a line without `Name:` continues the
+previous speaker, and lines starting with `#` are comments. Nobody transcribes
+two hours by hand, so a reference normally covers a fragment: only the words
+inside its time span are scored (or pass `-Start`/`-End`).
+
+```powershell
+# Make a reference: copy the transcript, keep a fragment of a few minutes,
+# then listen and fix every word and every speaker name in it.
+Copy-Item ..\gigastt-pyannote-output\<job>\transcript.txt .\media\reference.txt
+notepad .\media\reference.txt
+
+.\scripts\evaluate.ps1 ..\gigastt-pyannote-output\<job> -Reference .\media\reference.txt
+```
+
+The result goes to `<job>\evaluation.json`, together with every place where
+the words differ and its time in the recording, so you know what to listen to.
+The job itself is not modified.
+
+Two cautions:
+
+- **A reference made by correcting the transcript is optimistic.** Errors that
+  read naturally are easy to miss when the text is in front of you. For an
+  honest figure, type a fragment from scratch while listening.
+- **Write numbers the way the transcript does.** Number normalisation turns
+  "двадцать три" into "23"; a reference that spells it out counts that as an
+  error.
+
+With a reference in place, any change — a new GigaSTT, different filters,
+another speaker count — can be judged by numbers rather than by ear.
 
 ## How the audio is processed
 
@@ -448,6 +498,9 @@ left as a single cue — a wrong timestamp is worse than a long subtitle.
 
 # The gated pyannote model only
 .\scripts\download-models.ps1 -SkipGigaStt
+
+# Score a job against a reference fragment checked by ear
+.\scripts\evaluate.ps1 <job-dir> -Reference reference.txt
 ```
 
 ## Security and reproducibility
