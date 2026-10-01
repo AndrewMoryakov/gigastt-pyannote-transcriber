@@ -33,7 +33,8 @@ from .merge import UNKNOWN_SPEAKER
 # Pure-Python edit distance over n x m cells: a few thousand words a side is
 # instant, a whole recording against itself is not. Above this the table is
 # narrowed to a diagonal band (see align), and the band stops growing at the
-# second limit.
+# second limit. No table larger than the second limit is ever built: texts so
+# unequal in length that even the narrowest usable band exceeds it are refused.
 EXACT_ALIGNMENT_CELLS = 4_000_000
 MAX_ALIGNMENT_CELLS = 40_000_000
 INITIAL_BAND = 64
@@ -227,6 +228,12 @@ def _alignment(
     return steps, distance
 
 
+def _band_cells(rows: int, cols: int, band: int) -> int:
+    """Upper bound on the cells ``_alignment`` builds for this band."""
+
+    return (rows + 1) * min(2 * band + 1, cols + 1)
+
+
 def align(ref: Sequence[str], hyp: Sequence[str]) -> tuple[list[Step], str]:
     """Minimum-edit word alignment and whether it is proven minimal.
 
@@ -236,17 +243,30 @@ def align(ref: Sequence[str], hyp: Sequence[str]) -> tuple[list[Step], str]:
     once the distance is at most ``band`` no path outside can beat it and the
     result is exact. If the work limit is reached first, the alignment is the
     best one inside the band, the WER is an upper bound, and the method says so.
+
+    The band cannot be narrower than the difference in length, or the far corner
+    is out of reach. If even that band is over the work limit the texts cannot
+    describe the same stretch of speech, and there is no alignment worth
+    reporting: the call is refused before any table is built.
     """
 
     rows, cols = len(ref), len(hyp)
     if rows * cols <= EXACT_ALIGNMENT_CELLS:
         return _alignment(ref, hyp)[0], "exact"
     band = max(abs(rows - cols), INITIAL_BAND)
+    if _band_cells(rows, cols, band) > MAX_ALIGNMENT_CELLS:
+        raise ReferenceError(
+            f"The reference has {rows} words but the recognised text in the scored "
+            f"window has {cols}; they differ too much in length to be compared, so "
+            "they probably do not cover the same stretch of the recording. Give the "
+            "reference timestamps, or bound the window with --start/--end "
+            "(-Start/-End in evaluate.ps1)."
+        )
     while True:
         steps, distance = _alignment(ref, hyp, band)
         if distance <= band or band >= max(rows, cols):
             return steps, "exact"
-        if (rows + 1) * (4 * band + 1) > MAX_ALIGNMENT_CELLS:
+        if _band_cells(rows, cols, 2 * band) > MAX_ALIGNMENT_CELLS:
             return steps, "banded (WER is an upper bound)"
         band *= 2
 

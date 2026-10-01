@@ -146,6 +146,53 @@ def test_a_band_that_cannot_grow_far_enough_is_reported_as_an_upper_bound(monkey
     assert sum(step[0] != "equal" for step in steps) == 300
 
 
+def test_texts_too_unequal_in_length_are_refused_before_any_table_is_built(monkeypatch):
+    # The narrowest band that can reach the far corner is as wide as the length
+    # difference, so 50 words against 300 needs ~15 000 cells: over the limit.
+    # The limit has to hold before the first table, not only before doubling.
+    limit = 3000
+    monkeypatch.setattr(ev, "EXACT_ALIGNMENT_CELLS", 10)
+    monkeypatch.setattr(ev, "INITIAL_BAND", 2)
+    monkeypatch.setattr(ev, "MAX_ALIGNMENT_CELLS", limit)
+    built = []
+    real = ev._alignment
+
+    def spy(ref, hyp, band=None):
+        built.append((len(ref) + 1) * min(2 * band + 1, len(hyp) + 1))
+        assert built[-1] <= limit, f"a {built[-1]}-cell table was built; the limit is {limit}"
+        return real(ref, hyp, band)
+
+    monkeypatch.setattr(ev, "_alignment", spy)
+
+    with pytest.raises(ReferenceError, match="--start/--end"):
+        ev.align(["слово"] * 50, ["другое"] * 300)
+    assert built == []
+
+
+def test_the_reported_case_of_10000_against_30000_words_is_refused_at_once():
+    # With the real limits: this pair used to start on a ~250-million-cell table.
+    reference = "Отец: " + " ".join(["слово"] * 10_000) + "\n"
+    job = merged(("SPEAKER_00", " ".join(["другое"] * 30_000)))
+
+    with pytest.raises(ReferenceError, match="10000 words .* has 30000"):
+        evaluate(job, reference)
+
+
+def test_a_length_difference_that_still_fits_the_limit_is_aligned(monkeypatch):
+    # 20 words against 120: the band is 100 wide on each side but cannot be
+    # wider than the 120-word text, so the table is 21 x 121 = 2541 cells.
+    monkeypatch.setattr(ev, "EXACT_ALIGNMENT_CELLS", 10)
+    monkeypatch.setattr(ev, "INITIAL_BAND", 2)
+    monkeypatch.setattr(ev, "MAX_ALIGNMENT_CELLS", 3000)
+    reference = [f"слово{i}" for i in range(20)]
+    hypothesis = [f"слово{i // 6}" for i in range(120)]
+
+    steps, method = ev.align(reference, hypothesis)
+
+    assert method == "exact"
+    assert sum(step[0] == "insert" for step in steps) >= 100
+
+
 # ------------------------------------------------------------------ the parser
 
 
