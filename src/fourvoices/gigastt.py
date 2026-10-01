@@ -7,9 +7,11 @@ import os
 import re
 import subprocess
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
+
+from .progress import Reporter, format_duration
 
 
 class GigaSTTError(RuntimeError):
@@ -23,6 +25,9 @@ _LOG_LEVEL = re.compile(r"\b(WARN|ERROR)\b")
 # GigaSTT's own speaker model: pyannote does the diarization here.
 _EXPECTED_NOISE = ("gigastt_core::inference::diarization",)
 _MAX_REPORTED_PROBLEMS = 10
+# Logged once per decoded window (2.15.0 and 2.21.0). With VAD the number of
+# windows is not known in advance, so progress is a count, not a percentage.
+_WINDOW_DONE = "Decoded tokens"
 
 # Below this many words a transcript may legitimately carry no punctuation.
 _PUNCTUATION_CHECK_MIN_WORDS = 200
@@ -182,31 +187,30 @@ def transcribe(
     process_env = os.environ.copy()
     if env:
         process_env.update(env)
+    reporter = Reporter("GigaSTT")
+    windows = 0
+
+    def on_line(line: str) -> None:
+        nonlocal windows
+        if _WINDOW_DONE in line:
+            windows += 1
+            elapsed = format_duration(reporter.elapsed())
+            reporter.update(f"{windows} window(s) decoded, {elapsed} elapsed")
+
     try:
-        completed = subprocess.run(
-            command,
-            check=True,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            env=process_env,
-        )
+        returncode, log = _execute(command, process_env, on_line)
     except FileNotFoundError as exc:
         raise GigaSTTError(
             f"GigaSTT executable '{executable}' was not found on PATH."
         ) from exc
-    except subprocess.CalledProcessError as exc:
-        log = _process_log(exc.stdout, exc.stderr)
-        _write_log(log_path, log)
+    _write_log(log_path, log)
+    if returncode != 0:
         # The log opens with model-loading chatter; the reason is at the end.
         lines = _ANSI.sub("", log).strip().splitlines()
         detail = "\n".join(lines[-5:])
         raise GigaSTTError(
-            f"GigaSTT exited with code {exc.returncode} (full log: {log_path.name}): {detail}"
-        ) from exc
-    log = _process_log(completed.stdout, completed.stderr)
-    _write_log(log_path, log)
+            f"GigaSTT exited with code {returncode} (full log: {log_path.name}): {detail}"
+        )
     problems = log_problems(log)
     for line in problems[:_MAX_REPORTED_PROBLEMS]:
         print(f"warning: GigaSTT: {line}", file=sys.stderr, flush=True)
@@ -239,19 +243,46 @@ def transcribe(
         os.replace(temporary, destination)
     finally:
         temporary.unlink(missing_ok=True)
+    elapsed = reporter.elapsed()
+    audio = float(payload.get("duration", payload.get("duration_s", 0.0)) or 0.0)
+    speed = f", {audio / elapsed:.1f}x real time" if audio > 0 and elapsed > 0 else ""
+    reporter.update(f"done in {format_duration(elapsed)}{speed}", force=True)
     return payload
 
 
-def _process_log(stdout: str | None, stderr: str | None) -> str:
-    """Everything GigaSTT printed. Its `tracing` log goes to stdout, not stderr.
+def _execute(
+    command: Sequence[str], env: Mapping[str, str], on_line: Callable[[str], None]
+) -> tuple[int, str]:
+    """Run GigaSTT, hand each output line to ``on_line``; return the exit code and log.
 
-    With ``--output`` the JSON goes to the file, so stdout carries only the log
-    (checked against 2.15.0 and 2.21.0); stderr is kept too in case a release
-    moves the log or prints a panic there.
+    GigaSTT's `tracing` log goes to stdout, not stderr (checked against 2.15.0
+    and 2.21.0); with ``--output`` the JSON goes to the file. stderr is merged
+    in so a panic or a release that moves the log is kept as well. Lines are
+    read as they come, which is what lets a long recognition report progress.
     """
 
-    parts = [text for text in (stdout, stderr) if text]
-    return "".join(part if part.endswith("\n") else part + "\n" for part in parts)
+    process = subprocess.Popen(
+        list(command),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=dict(env),
+    )
+    lines: list[str] = []
+    try:
+        assert process.stdout is not None
+        for line in process.stdout:
+            lines.append(line)
+            on_line(line)
+        returncode = process.wait()
+    finally:
+        # Ctrl+C or a failing callback must not leave GigaSTT running.
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+    return returncode, "".join(lines)
 
 
 def _write_log(path: Path, text: str | None) -> None:

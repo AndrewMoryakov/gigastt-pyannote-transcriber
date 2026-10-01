@@ -38,6 +38,7 @@ from .gigastt import (
     transcribe,
 )
 from .merge import merge_transcript
+from .progress import format_duration
 from .render import DEFAULT_CUE_CHARS, DEFAULT_CUE_SECONDS, write_outputs
 
 
@@ -496,7 +497,11 @@ def run_pipeline(args: argparse.Namespace) -> Path:
         transcript = load_transcript(asr_path)
         asr_version = recorded_gigastt
     else:
-        print("[2/5] Running GigaSTT RNNT…", flush=True)
+        print(
+            "[2/5] Running GigaSTT RNNT on "
+            f"{format_duration(prepared.source_info.duration)} of audio…",
+            flush=True,
+        )
         recomputed.add("asr")
         asr_version = current_gigastt
         transcript = transcribe(

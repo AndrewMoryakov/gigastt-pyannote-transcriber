@@ -34,7 +34,12 @@ class _Pipeline:
     def to(self, device):
         return self
 
-    def __call__(self, _audio, num_speakers=None):
+    def __call__(self, _audio, num_speakers=None, hook=None):
+        # Drive the hook the way pyannote 4 does: counted calls, then a bare one.
+        if hook is not None:
+            hook("segmentation", None, total=4, completed=0)
+            hook("segmentation", None, total=4, completed=5)  # batches overshoot
+            hook("segmentation", object())
         return _Output(self._tracks)
 
 
@@ -132,3 +137,13 @@ def test_telemetry_stays_off_even_if_the_shell_turned_it_on():
         [sys.executable, "-c", script], env=env, capture_output=True, text=True, check=True
     )
     assert completed.stdout.split() == ["0", "1"]
+
+
+def test_diarization_reports_its_progress(monkeypatch, tmp_path, capsys):
+    source = _install_stubs(monkeypatch, tmp_path, TWO_SPEAKERS)
+
+    diarize_module.diarize(source, tmp_path / "out.json", num_speakers=2)
+
+    out = capsys.readouterr().out
+    assert "pyannote: segmentation 0%" in out
+    assert "pyannote: segmentation done" in out

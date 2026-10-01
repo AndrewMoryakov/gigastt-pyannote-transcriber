@@ -1,6 +1,7 @@
 import json
 import subprocess
 
+from fourvoices import gigastt
 from fourvoices.gigastt import transcribe
 
 
@@ -10,7 +11,7 @@ def test_transcribe_uses_supported_gigastt_flags(tmp_path, monkeypatch):
     destination = tmp_path / "result.json"
     seen = {}
 
-    def fake_run(command, **kwargs):
+    def fake_execute(command, env, on_line):
         seen["command"] = command
         output = command[command.index("--output") + 1]
         with open(output, "w", encoding="utf-8") as stream:
@@ -29,9 +30,9 @@ def test_transcribe_uses_supported_gigastt_flags(tmp_path, monkeypatch):
                 },
                 stream,
             )
-        return subprocess.CompletedProcess(command, 0, "", "")
+        return 0, ""
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(gigastt, "_execute", fake_execute)
     payload = transcribe(
         source,
         destination,
@@ -55,13 +56,13 @@ def test_unparsable_output_is_kept_for_inspection(tmp_path, monkeypatch):
     source.write_bytes(b"RIFF")
     destination = tmp_path / "result.json"
 
-    def fake_run(command, **kwargs):
+    def fake_execute(command, env, on_line):
         output = command[command.index("--output") + 1]
         with open(output, "w", encoding="utf-8") as stream:
             stream.write('{"segments": []}')  # no word timestamps
-        return subprocess.CompletedProcess(command, 0, "", "")
+        return 0, ""
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(gigastt, "_execute", fake_execute)
     with pytest.raises(GigaSTTError, match="rejected"):
         transcribe(source, destination, executable="gigastt.exe")
 
@@ -83,13 +84,14 @@ DEGRADED_LOG = (
 )
 
 
-def fake_gigastt(log="", text="тест", returncode=0, stream="stdout"):
-    # The real binary writes its tracing log to stdout (2.15.0 and 2.21.0 both).
-    stdout, stderr = (log, "") if stream == "stdout" else ("", log)
+def fake_gigastt(log="", text="тест", returncode=0):
+    """Stands in for _execute: feeds the log line by line, as the real reader does."""
 
-    def fake_run(command, **kwargs):
+    def fake_execute(command, env, on_line):
+        for line in log.splitlines(keepends=True):
+            on_line(line)
         if returncode:
-            raise subprocess.CalledProcessError(returncode, command, stdout, stderr)
+            return returncode, log
         output = command[command.index("--output") + 1]
         with open(output, "w", encoding="utf-8") as stream:
             json.dump(
@@ -100,15 +102,15 @@ def fake_gigastt(log="", text="тест", returncode=0, stream="stdout"):
                 },
                 stream,
             )
-        return subprocess.CompletedProcess(command, 0, stdout, stderr)
+        return 0, log
 
-    return fake_run
+    return fake_execute
 
 
 def test_the_log_is_kept_without_colour_codes(tmp_path, monkeypatch):
     source = tmp_path / "input.wav"
     source.write_bytes(b"RIFF")
-    monkeypatch.setattr(subprocess, "run", fake_gigastt(DEGRADED_LOG))
+    monkeypatch.setattr(gigastt, "_execute", fake_gigastt(DEGRADED_LOG))
 
     transcribe(source, tmp_path / "gigastt.json", executable="gigastt.exe")
 
@@ -120,7 +122,7 @@ def test_the_log_is_kept_without_colour_codes(tmp_path, monkeypatch):
 def test_warnings_reach_the_user_but_expected_noise_does_not(tmp_path, monkeypatch, capsys):
     source = tmp_path / "input.wav"
     source.write_bytes(b"RIFF")
-    monkeypatch.setattr(subprocess, "run", fake_gigastt(DEGRADED_LOG))
+    monkeypatch.setattr(gigastt, "_execute", fake_gigastt(DEGRADED_LOG))
 
     transcribe(source, tmp_path / "gigastt.json", executable="gigastt.exe")
 
@@ -146,7 +148,7 @@ def test_a_failure_names_the_log_and_quotes_its_end(tmp_path, monkeypatch):
     source.write_bytes(b"RIFF")
     stderr = "".join(f"INFO line {index}\n" for index in range(40))
     stderr += "Error: invalid audio: Audio file too long (1800s). Maximum supported: 1800s.\n"
-    monkeypatch.setattr(subprocess, "run", fake_gigastt(stderr, returncode=1))
+    monkeypatch.setattr(gigastt, "_execute", fake_gigastt(stderr, returncode=1))
 
     with pytest.raises(GigaSTTError) as error:
         transcribe(source, tmp_path / "gigastt.json", executable="gigastt.exe")
@@ -192,16 +194,37 @@ def test_punctuation_is_missing_only_when_requested_and_the_text_is_long():
     assert not punctuation_missing(_payload(3, "да нет наверное"), "on")
 
 
-def test_a_log_printed_to_stderr_is_kept_as_well(tmp_path, monkeypatch, capsys):
+def test_execute_streams_stdout_and_keeps_stderr():
+    import os
+    import sys
+
+    script = (
+        "import sys; print('INFO first', flush=True); "
+        "print('WARN on stderr', file=sys.stderr, flush=True); "
+        "print('INFO Decoded tokens tokens=3', flush=True); sys.exit(3)"
+    )
+    seen = []
+    returncode, log = gigastt._execute(
+        [sys.executable, "-c", script], dict(os.environ), seen.append
+    )
+
+    assert returncode == 3
+    assert "WARN on stderr" in log and "INFO first" in log
+    assert [line.strip() for line in seen] == [line.strip() for line in log.splitlines()]
+
+
+def test_progress_counts_windows_and_reports_the_speed(tmp_path, monkeypatch, capsys):
     source = tmp_path / "input.wav"
     source.write_bytes(b"RIFF")
-    monkeypatch.setattr(subprocess, "run", fake_gigastt(DEGRADED_LOG, stream="stderr"))
+    log = "".join(f"INFO Decoded tokens tokens=5 words=2 duration_ms={i}\n" for i in range(3))
+    monkeypatch.setattr(gigastt, "_execute", fake_gigastt(log))
 
     transcribe(source, tmp_path / "gigastt.json", executable="gigastt.exe")
 
-    log = (tmp_path / "gigastt.log").read_text(encoding="utf-8")
-    assert "Punctuation restore failed" in log
-    assert "Punctuation restore failed" in capsys.readouterr().err
+    out = capsys.readouterr().out
+    # The first window is reported at once; the rest fall inside the interval.
+    assert "GigaSTT: 1 window(s) decoded" in out
+    assert "GigaSTT: done in 0:00" in out
 
 
 def test_numbers_written_by_itn_do_not_pass_for_punctuation():
@@ -219,10 +242,10 @@ def test_a_successful_exit_without_json_points_at_the_log(tmp_path, monkeypatch)
     source = tmp_path / "input.wav"
     source.write_bytes(b"RIFF")
 
-    def fake_run(command, **kwargs):
-        return subprocess.CompletedProcess(command, 0, "INFO nothing written\n", "")
+    def fake_execute(command, env, on_line):
+        return 0, "INFO nothing written\n"
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(gigastt, "_execute", fake_execute)
     with pytest.raises(GigaSTTError, match="wrote no JSON; see gigastt.log"):
         transcribe(source, tmp_path / "gigastt.json", executable="gigastt.exe")
     assert not (tmp_path / "gigastt.json.rejected").exists()
