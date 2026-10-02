@@ -1,0 +1,380 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fourvoices — расшифровка</title>
+<style>
+  :root { --bg:#f5f6f8; --card:#fff; --ink:#1d2330; --muted:#69728a; --line:#dde1ea;
+          --accent:#2563eb; --ok:#15803d; --bad:#b91c1c; --warn:#b45309; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+         font:15px/1.5 system-ui,"Segoe UI",sans-serif; }
+  header { background:var(--card); border-bottom:1px solid var(--line); padding:14px 24px;
+           display:flex; flex-wrap:wrap; align-items:center; gap:16px; }
+  header h1 { font-size:18px; margin:0; margin-right:auto; }
+  main { max-width:980px; margin:0 auto; padding:20px 16px 60px; display:grid; gap:16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:18px; }
+  .card h2 { font-size:16px; margin:0 0 12px; }
+  .chip { display:inline-flex; align-items:center; gap:6px; padding:3px 10px; border-radius:999px;
+          font-size:13px; border:1px solid var(--line); background:#fafbfc; }
+  .chip::before { content:""; width:8px; height:8px; border-radius:50%; background:var(--muted); }
+  .chip.ok::before { background:var(--ok); } .chip.bad::before { background:var(--bad); }
+  .row { display:flex; flex-wrap:wrap; gap:12px; align-items:center; }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  @media (max-width:720px) { .grid2 { grid-template-columns:1fr; } }
+  .box { border:1px dashed var(--line); border-radius:8px; padding:14px; }
+  .box.drag { border-color:var(--accent); background:#eff4ff; }
+  .box h3 { margin:0 0 8px; font-size:14px; }
+  button { font:inherit; padding:7px 14px; border-radius:8px; border:1px solid var(--line);
+           background:#fff; cursor:pointer; }
+  button:hover:not(:disabled) { border-color:var(--accent); }
+  button.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
+  button.danger { color:var(--bad); }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  input[type=text], input[type=password], input[type=number], select {
+    font:inherit; padding:6px 9px; border:1px solid var(--line); border-radius:8px; }
+  input[type=number] { width:72px; }
+  .muted { color:var(--muted); font-size:13px; }
+  .msg { margin-top:10px; font-size:14px; } .msg.bad { color:var(--bad); } .msg.ok { color:var(--ok); }
+  .steps { display:flex; gap:6px; margin:10px 0; }
+  .steps div { flex:1; height:8px; border-radius:4px; background:var(--line); }
+  .steps div.done { background:var(--ok); } .steps div.cur { background:var(--accent); }
+  pre { background:#0f172a; color:#d6deeb; padding:12px; border-radius:8px; overflow:auto;
+        max-height:260px; font-size:12px; margin:8px 0 0; white-space:pre-wrap; }
+  pre.preview { background:#fafbfc; color:var(--ink); border:1px solid var(--line);
+                max-height:420px; font-size:13px; font-family:inherit; }
+  table { width:100%; border-collapse:collapse; }
+  th, td { text-align:left; padding:8px 6px; border-bottom:1px solid var(--line); font-size:14px; }
+  tr.item { cursor:pointer; } tr.item:hover { background:#f3f6fd; }
+  .tabs { display:flex; gap:6px; flex-wrap:wrap; margin:10px 0; }
+  .tabs button.on { background:var(--accent); color:#fff; border-color:var(--accent); }
+  .names { display:grid; grid-template-columns:auto 1fr; gap:8px 12px; align-items:center; margin:10px 0; }
+  .rec-dot { display:inline-block; width:10px; height:10px; border-radius:50%; background:var(--bad);
+             margin-right:6px; animation:blink 1s infinite; }
+  @keyframes blink { 50% { opacity:.25; } }
+  [hidden] { display:none !important; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Fourvoices · расшифровка с разделением по говорящим</h1>
+  <span class="chip" id="chipToken">токен</span>
+  <span class="chip" id="chipFfmpeg">ffmpeg</span>
+  <span class="chip" id="chipModels">модели</span>
+  <span class="muted" id="free"></span>
+</header>
+
+<main>
+  <section class="card" id="tokenCard" hidden>
+    <h2>1. Токен Hugging Face</h2>
+    <p class="muted">Нужен read-токен (<a href="https://huggingface.co/settings/tokens" target="_blank" rel="noopener">создать</a>)
+      и принятые условия модели
+      <a href="https://huggingface.co/pyannote/speaker-diarization-community-1" target="_blank" rel="noopener">pyannote/speaker-diarization-community-1</a>.
+      Токен сохраняется в локальный файл <code>.env</code> (в Git он не попадает).</p>
+    <div class="row">
+      <input type="password" id="tokenInput" placeholder="hf_…" size="44" autocomplete="off">
+      <button class="primary" id="tokenSave">Сохранить</button>
+    </div>
+    <div class="msg" id="tokenMsg"></div>
+  </section>
+
+  <section class="card">
+    <h2>Новая расшифровка</h2>
+    <div class="grid2">
+      <div class="box" id="drop">
+        <h3>Аудиофайл</h3>
+        <input type="file" id="fileInput" accept="audio/*,video/*,.m4a,.mp3,.wav,.flac,.ogg,.opus,.aac,.wma,.webm,.mp4">
+        <p class="muted">Можно перетащить файл сюда.</p>
+        <div class="row">
+          <label class="muted" for="mediaSelect">или уже загруженный:</label>
+          <select id="mediaSelect"><option value="">—</option></select>
+        </div>
+      </div>
+      <div class="box">
+        <h3>Микрофон</h3>
+        <div class="row">
+          <button id="recStart">● Запись</button>
+          <button id="recStop" class="danger" hidden>■ Стоп</button>
+          <span id="recTimer" class="muted"></span>
+        </div>
+        <audio id="recPlayer" controls hidden style="width:100%;margin-top:10px"></audio>
+        <div class="msg muted" id="recMsg">Браузер запросит доступ к микрофону.</div>
+      </div>
+    </div>
+    <div class="row" style="margin-top:14px">
+      <label>Говорящих: <input type="number" id="speakers" min="1" max="32" value="2"></label>
+      <label><input type="checkbox" id="downmix"> сводить стерео в моно</label>
+      <label title="Нужно, если вы меняете число говорящих у уже обработанного файла">
+        <input type="checkbox" id="force"> пересчитать заново</label>
+      <button class="primary" id="go" style="margin-left:auto">Расшифровать</button>
+    </div>
+    <div id="chosen" class="muted" style="margin-top:8px"></div>
+    <progress id="upload" max="100" value="0" hidden style="width:100%;margin-top:8px"></progress>
+    <div class="msg" id="goMsg"></div>
+  </section>
+
+  <section class="card" id="jobCard" hidden>
+    <h2>Текущее задание</h2>
+    <div class="row"><b id="jobFile"></b><span class="chip" id="jobState"></span>
+      <button class="danger" id="jobCancel" style="margin-left:auto">Отменить</button></div>
+    <div class="steps" id="steps"><div></div><div></div><div></div><div></div><div></div></div>
+    <div class="muted" id="jobStage"></div>
+    <div class="msg bad" id="jobError"></div>
+    <details><summary class="muted">Журнал</summary><pre id="jobLog"></pre></details>
+    <p class="muted">Долгие записи считаются на CPU заметно дольше самой записи; окно можно не закрывать.</p>
+  </section>
+
+  <section class="card">
+    <h2>История</h2>
+    <table id="history"><thead><tr><th>Файл</th><th>Обновлено</th><th>Статус</th></tr></thead><tbody></tbody></table>
+    <div class="muted" id="historyEmpty" hidden>Пока пусто.</div>
+  </section>
+
+  <section class="card" id="detail" hidden>
+    <h2 id="detailTitle"></h2>
+    <div class="tabs" id="tabs"></div>
+    <pre class="preview" id="preview"></pre>
+    <div class="row" style="margin-top:10px" id="downloads"></div>
+    <h2 style="margin-top:18px">Имена говорящих</h2>
+    <p class="muted">Метки <code>SPEAKER_00</code> заменяются именами в md/txt/srt/vtt; json остаётся с метками.
+      Перерисовка быстрая, распознавание заново не запускается.</p>
+    <div class="names" id="names"></div>
+    <div class="row"><button class="primary" id="namesSave">Применить имена</button></div>
+    <div class="msg" id="namesMsg"></div>
+  </section>
+</main>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const api = async (path, options = {}) => {
+  const init = { method: options.method || "GET", headers: {} };
+  if (init.method === "POST") init.headers["X-FV"] = "1";
+  if (options.json !== undefined) {
+    init.headers["Content-Type"] = "application/json";
+    init.body = JSON.stringify(options.json);
+  }
+  const response = await fetch(path, init);
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || response.statusText);
+  return data;
+};
+const say = (id, text, kind = "") => { const e = $(id); e.textContent = text; e.className = "msg " + kind; };
+const chip = (id, ok, text) => { const e = $(id); e.textContent = text; e.className = "chip " + (ok ? "ok" : "bad"); };
+
+let status = null, activeJob = null, pollTimer = null, selectedFile = null, recorded = null;
+let detailId = null, detailFiles = [], currentTab = null;
+
+// ---------------------------------------------------------------- status & token
+async function loadStatus() {
+  status = await api("/api/status");
+  chip("chipToken", status.token.set, status.token.set ? "токен " + status.token.masked : "нет токена");
+  chip("chipFfmpeg", status.ffmpeg, status.ffmpeg ? "ffmpeg" : "ffmpeg не найден");
+  const m = status.models;
+  chip("chipModels", m.gigastt && m.pyannote,
+       m.gigastt && m.pyannote ? "модели готовы" : "модели не скачаны");
+  $("free").textContent = "свободно " + status.free_gb + " ГБ";
+  $("tokenCard").hidden = status.token.set;
+  const select = $("mediaSelect"), current = select.value;
+  select.innerHTML = '<option value="">—</option>' +
+    status.media.map((n) => `<option>${n.replace(/</g, "&lt;")}</option>`).join("");
+  select.value = status.media.includes(current) ? current : "";
+  if (!status.models.gigastt || !status.models.pyannote)
+    say("goMsg", "Модели не скачаны: запустите scripts\\download-models.ps1.", "bad");
+  else if (!status.ffmpeg) say("goMsg", "ffmpeg/ffprobe не найден в PATH.", "bad");
+}
+$("chipToken").onclick = () => { $("tokenCard").hidden = false; };
+$("tokenSave").onclick = async () => {
+  try {
+    const r = await api("/api/token", { method: "POST", json: { token: $("tokenInput").value } });
+    $("tokenInput").value = "";
+    say("tokenMsg", "Сохранено: " + r.masked, "ok");
+    await loadStatus();
+  } catch (e) { say("tokenMsg", e.message, "bad"); }
+};
+
+// ---------------------------------------------------------------- file / mic input
+function choose(file, label) {
+  selectedFile = file; recorded = file && file.recorded ? file : null;
+  $("chosen").textContent = label || "";
+}
+$("fileInput").onchange = (e) => {
+  const f = e.target.files[0];
+  if (f) { choose(f, "Выбран файл: " + f.name); $("mediaSelect").value = ""; }
+};
+$("mediaSelect").onchange = (e) => {
+  if (e.target.value) { choose({ existing: e.target.value }, "Из папки media: " + e.target.value);
+                        $("fileInput").value = ""; }
+};
+const drop = $("drop");
+["dragenter", "dragover"].forEach((t) => drop.addEventListener(t, (e) => { e.preventDefault(); drop.classList.add("drag"); }));
+["dragleave", "drop"].forEach((t) => drop.addEventListener(t, (e) => { e.preventDefault(); drop.classList.remove("drag"); }));
+drop.addEventListener("drop", (e) => {
+  const f = e.dataTransfer.files[0];
+  if (f) { choose(f, "Выбран файл: " + f.name); $("mediaSelect").value = ""; }
+});
+
+let recorder = null, chunks = [], stream = null, recStarted = 0, recTick = null;
+const fmt = (s) => String(Math.floor(s / 60)).padStart(2, "0") + ":" + String(Math.floor(s % 60)).padStart(2, "0");
+$("recStart").onclick = async () => {
+  if (!navigator.mediaDevices || !window.MediaRecorder) {
+    return say("recMsg", "Этот браузер не поддерживает запись с микрофона.", "bad");
+  }
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (e) {
+    return say("recMsg", "Нет доступа к микрофону: проверьте разрешение в браузере и в «Параметры → Конфиденциальность → Микрофон».", "bad");
+  }
+  chunks = []; recorder = new MediaRecorder(stream);
+  recorder.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+  recorder.onstop = () => {
+    stream.getTracks().forEach((t) => t.stop());
+    clearInterval(recTick);
+    const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
+    const ext = blob.type.includes("ogg") ? "ogg" : "webm";
+    const stamp = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14);
+    blob.name = `rec-${stamp}.${ext}`; blob.recorded = true;
+    $("recPlayer").src = URL.createObjectURL(blob); $("recPlayer").hidden = false;
+    choose(blob, `Запись с микрофона (${fmt((Date.now() - recStarted) / 1000)})`);
+    $("fileInput").value = ""; $("mediaSelect").value = "";
+    say("recMsg", "Запись готова. Нажмите «Расшифровать».", "ok");
+    $("recStart").hidden = false; $("recStop").hidden = true;
+  };
+  recorder.start(1000); recStarted = Date.now();
+  $("recStart").hidden = true; $("recStop").hidden = false; $("recPlayer").hidden = true;
+  $("recMsg").innerHTML = '<span class="rec-dot"></span>идёт запись…'; $("recMsg").className = "msg";
+  recTick = setInterval(() => { $("recTimer").textContent = fmt((Date.now() - recStarted) / 1000); }, 500);
+};
+$("recStop").onclick = () => recorder && recorder.state !== "inactive" && recorder.stop();
+
+// ---------------------------------------------------------------- upload & start
+function upload(file) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const url = "/api/upload?name=" + encodeURIComponent(file.name) + (file.recorded ? "&convert=1" : "");
+    xhr.open("POST", url);
+    xhr.setRequestHeader("X-FV", "1");
+    xhr.upload.onprogress = (e) => { if (e.lengthComputable) $("upload").value = (e.loaded / e.total) * 100; };
+    xhr.onload = () => {
+      let data = {}; try { data = JSON.parse(xhr.responseText); } catch (_) {}
+      xhr.status === 200 ? resolve(data) : reject(new Error(data.error || "Ошибка загрузки"));
+    };
+    xhr.onerror = () => reject(new Error("Сеть недоступна"));
+    xhr.send(file);
+  });
+}
+$("go").onclick = async () => {
+  say("goMsg", "");
+  if (!selectedFile) return say("goMsg", "Выберите файл или запишите звук.", "bad");
+  $("go").disabled = true;
+  try {
+    let name;
+    if (selectedFile.existing) name = selectedFile.existing;
+    else {
+      $("upload").hidden = false; $("upload").value = 0;
+      say("goMsg", "Загружаю файл…");
+      name = (await upload(selectedFile)).file;
+    }
+    const job = await api("/api/jobs", { method: "POST", json: {
+      file: name, num_speakers: Number($("speakers").value),
+      allow_downmix: $("downmix").checked, force: $("force").checked } });
+    localStorage.setItem("speakers", $("speakers").value);
+    say("goMsg", "Задание запущено.", "ok");
+    watchJob(job.id);
+    await loadStatus();
+  } catch (e) { say("goMsg", e.message, "bad"); }
+  finally { $("go").disabled = false; $("upload").hidden = true; }
+};
+
+// ---------------------------------------------------------------- job progress
+const STATES = { queued: "в очереди", running: "выполняется", done: "готово",
+                 failed: "ошибка", cancelled: "отменено" };
+function renderJob(job) {
+  $("jobCard").hidden = false;
+  $("jobFile").textContent = job.file;
+  const state = $("jobState"); state.textContent = STATES[job.state] || job.state;
+  state.className = "chip " + (job.state === "done" ? "ok" : job.state === "failed" ? "bad" : "");
+  [...$("steps").children].forEach((el, i) => {
+    el.className = i < job.stage - (job.state === "running" ? 1 : 0) || job.state === "done" ? "done"
+                 : i === job.stage - 1 && job.state === "running" ? "cur" : "";
+  });
+  $("jobStage").textContent = job.stage_text ? `Этап ${job.stage}/5: ${job.stage_text}` : "";
+  $("jobError").textContent = job.state === "failed" ? (job.error || "") : "";
+  $("jobCancel").hidden = !["queued", "running"].includes(job.state);
+  const log = $("jobLog"), stick = log.scrollTop + log.clientHeight >= log.scrollHeight - 20;
+  log.textContent = job.log.join("\n"); if (stick) log.scrollTop = log.scrollHeight;
+}
+function watchJob(id) {
+  activeJob = id; clearTimeout(pollTimer);
+  const tick = async () => {
+    try {
+      const job = await api("/api/jobs/" + encodeURIComponent(id));
+      renderJob(job);
+      if (["queued", "running"].includes(job.state)) pollTimer = setTimeout(tick, 1500);
+      else { loadHistory(); if (job.state === "done" && job.output_dir) openDetail(job.output_dir); }
+    } catch (e) { pollTimer = setTimeout(tick, 3000); }
+  };
+  tick();
+}
+$("jobCancel").onclick = async () => { if (activeJob) { await api(`/api/jobs/${activeJob}/cancel`, { method: "POST" }); } };
+
+// ---------------------------------------------------------------- history & detail
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+async function loadHistory() {
+  const items = await api("/api/history");
+  $("historyEmpty").hidden = items.length > 0;
+  $("history").hidden = items.length === 0;
+  $("history").tBodies[0].innerHTML = items.map((it) =>
+    `<tr class="item" data-id="${esc(it.id)}"><td>${esc(it.input)}</td>
+     <td>${esc(it.updated_at.replace("T", " ").slice(0, 16))}</td>
+     <td>${it.complete ? "готово" : "не завершено (" + it.stages.length + "/4)"}</td></tr>`).join("");
+  [...$("history").tBodies[0].rows].forEach((row) => { row.onclick = () => openDetail(row.dataset.id); });
+}
+async function openDetail(id) {
+  try {
+    const d = await api("/api/history/" + encodeURIComponent(id));
+    detailId = id; detailFiles = d.files;
+    $("detail").hidden = false; $("detailTitle").textContent = d.input;
+    $("tabs").innerHTML = d.files.map((f) => `<button data-f="${esc(f)}">${esc(f.split(".").pop())}</button>`).join("");
+    [...$("tabs").children].forEach((b) => { b.onclick = () => showFile(b.dataset.f); });
+    $("downloads").innerHTML = d.files.map((f) =>
+      `<a href="/api/history/${encodeURIComponent(id)}/file/${encodeURIComponent(f)}?download=1">⬇ ${esc(f)}</a>`).join(" · ");
+    $("names").innerHTML = d.speakers.length ? d.speakers.map((s) =>
+      `<label>${esc(s)}</label><input type="text" data-label="${esc(s)}" maxlength="80" value="${esc(d.speaker_names[s] || "")}" placeholder="Имя">`).join("")
+      : '<span class="muted">Говорящие не найдены.</span>';
+    $("namesSave").disabled = !d.speakers.length; say("namesMsg", "");
+    const pick = d.files.includes("transcript.txt") ? "transcript.txt" : d.files[0];
+    if (pick) showFile(pick); else $("preview").textContent = "Результат ещё не сформирован.";
+    $("detail").scrollIntoView({ behavior: "smooth", block: "start" });
+  } catch (e) { say("namesMsg", e.message, "bad"); }
+}
+async function showFile(name) {
+  currentTab = name;
+  [...$("tabs").children].forEach((b) => b.classList.toggle("on", b.dataset.f === name));
+  const r = await fetch(`/api/history/${encodeURIComponent(detailId)}/file/${encodeURIComponent(name)}`);
+  $("preview").textContent = r.ok ? await r.text() : "Не удалось загрузить файл.";
+}
+$("namesSave").onclick = async () => {
+  const names = {};
+  document.querySelectorAll("#names input").forEach((i) => { names[i.dataset.label] = i.value.trim(); });
+  $("namesSave").disabled = true; say("namesMsg", "Применяю…");
+  try {
+    await api(`/api/history/${encodeURIComponent(detailId)}/speakers`, { method: "POST", json: { names } });
+    say("namesMsg", "Имена применены.", "ok");
+    if (currentTab) await showFile(currentTab);
+  } catch (e) { say("namesMsg", e.message, "bad"); }
+  finally { $("namesSave").disabled = false; }
+};
+
+// ---------------------------------------------------------------- start
+(async () => {
+  $("speakers").value = localStorage.getItem("speakers") || "2";
+  await loadStatus(); await loadHistory();
+  const jobs = await api("/api/jobs");
+  const live = jobs.find((j) => ["queued", "running"].includes(j.state)) || jobs[0];
+  if (live) watchJob(live.id);
+})().catch((e) => say("goMsg", "Не удалось связаться с сервером: " + e.message, "bad"));
+</script>
+</body>
+</html>
