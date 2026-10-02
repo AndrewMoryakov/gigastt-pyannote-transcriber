@@ -10,6 +10,8 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
+from .progress import DiarizationProgress, Reporter
+
 # Evidence processing is local by design. Set these before importing HF/pyannote.
 # Assigned, not defaulted: pyannote.audio 4 reports file durations and speaker
 # counts to otel.pyannote.ai unless PYANNOTE_METRICS_ENABLED is false, and a
@@ -139,6 +141,7 @@ def diarize(
         output = pipeline(
             {"waveform": waveform, "sample_rate": sample_rate},
             num_speakers=num_speakers,
+            hook=DiarizationProgress(Reporter("pyannote")),
         )
     except DiarizationError:
         raise

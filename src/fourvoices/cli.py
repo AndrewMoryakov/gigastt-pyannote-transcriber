@@ -30,6 +30,7 @@ from .diarize import (
     load_diarization,
     preload_model,
 )
+from .evaluate import ReferenceError, evaluate, parse_seconds, summary_lines
 from .gigastt import (
     GigaSTTError,
     gigastt_version,
@@ -38,6 +39,7 @@ from .gigastt import (
     transcribe,
 )
 from .merge import merge_transcript
+from .progress import format_duration
 from .render import DEFAULT_CUE_CHARS, DEFAULT_CUE_SECONDS, write_outputs
 
 
@@ -496,7 +498,11 @@ def run_pipeline(args: argparse.Namespace) -> Path:
         transcript = load_transcript(asr_path)
         asr_version = recorded_gigastt
     else:
-        print("[2/5] Running GigaSTT RNNT…", flush=True)
+        print(
+            "[2/5] Running GigaSTT RNNT on "
+            f"{format_duration(prepared.source_info.duration)} of audio…",
+            flush=True,
+        )
         recomputed.add("asr")
         asr_version = current_gigastt
         transcript = transcribe(
@@ -653,20 +659,28 @@ def run_pipeline(args: argparse.Namespace) -> Path:
     return output_dir
 
 
-def _render_job(args: argparse.Namespace) -> Path:
-    job = Path(args.job_dir).expanduser().resolve()
-    merged_path = job / "intermediate" / "merged.json"
+def _vouched_job(job_dir: str) -> tuple[Path, dict[str, Any], dict[str, Any]]:
+    """The job directory, its manifest (or ``{}``) and its merged result.
+
+    A run that redid recognition or diarization retracts the merge when it
+    records the new stage; if it was interrupted before rebuilding it,
+    merged.json still holds the old words and nothing vouches for it.
+    """
+
+    job = Path(job_dir).expanduser().resolve()
     manifest_path = job / "manifest.json"
     manifest = _load_json(manifest_path) if manifest_path.is_file() else {}
     if manifest and "merge" not in manifest.get("stages", {}):
-        # A run that redid recognition or diarization retracts the merge before
-        # rebuilding it; if it was interrupted, merged.json still holds the old
-        # words and rendering it would publish a transcript nothing vouches for.
         raise PipelineError(
             "The manifest does not vouch for intermediate/merged.json (an interrupted "
             "run redid recognition or diarization). Finish it with the run command first."
         )
-    merged = _load_json(merged_path)
+    return job, manifest, _load_json(job / "intermediate" / "merged.json")
+
+
+def _render_job(args: argparse.Namespace) -> Path:
+    job, manifest, merged = _vouched_job(args.job_dir)
+    manifest_path = job / "manifest.json"
     names = _speaker_names(
         args.speaker_map, args.speaker_name, known=merged.get("speakers", [])
     )
@@ -783,6 +797,30 @@ def _model_checks(
     return checks
 
 
+def _evaluate_job(args: argparse.Namespace) -> dict[str, Any]:
+    job, _, merged = _vouched_job(args.job_dir)
+    reference_path = Path(args.reference).expanduser().resolve()
+    try:
+        reference_text = reference_path.read_text(encoding="utf-8-sig")
+    except OSError as exc:
+        raise PipelineError(f"Cannot read the reference {reference_path}: {exc}") from exc
+    result = evaluate(
+        merged,
+        reference_text,
+        start=parse_seconds(args.start) if args.start else None,
+        end=parse_seconds(args.end) if args.end else None,
+    )
+    result["reference"] = reference_path.name
+    output = job / "evaluation.json"
+    if args.output:
+        output = Path(args.output).expanduser().resolve()
+    _atomic_json(output, result)
+    for line in summary_lines(result):
+        print(line)
+    print(f"Written: {output}")
+    return result
+
+
 def _doctor(args: argparse.Namespace) -> int:
     config, config_path = _load_config(args.config)
     base = _project_root(config_path)
@@ -894,6 +932,21 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument("--gigastt-exe", default="gigastt")
     doctor.add_argument("--model-dir", help="GigaSTT model directory to check")
 
+    evaluation = commands.add_parser(
+        "evaluate", help="Score a job against a reference transcript checked by ear"
+    )
+    evaluation.add_argument("--job-dir", required=True)
+    evaluation.add_argument(
+        "--reference",
+        required=True,
+        help="Text in the shape of transcript.txt: '[hh:mm:ss–hh:mm:ss] Name: text' lines",
+    )
+    evaluation.add_argument(
+        "--start", help="Score from here (hh:mm:ss or seconds); default: the reference's span"
+    )
+    evaluation.add_argument("--end", help="Score up to here (hh:mm:ss or seconds)")
+    evaluation.add_argument("--output", help="Default: <job>/evaluation.json")
+
     render = commands.add_parser("render", help="Rerender merged JSON without inference")
     render.add_argument("--job-dir", required=True)
     render.add_argument("--speaker-map")
@@ -936,8 +989,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         if args.command == "doctor":
             return _doctor(args)
+        if args.command == "evaluate":
+            _evaluate_job(args)
+            return 0
         raise PipelineError(f"Unknown command: {args.command}")
-    except (PipelineError, AudioPreparationError, GigaSTTError, DiarizationError) as exc:
+    except (
+        PipelineError,
+        AudioPreparationError,
+        GigaSTTError,
+        DiarizationError,
+        ReferenceError,
+    ) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     except KeyboardInterrupt:
