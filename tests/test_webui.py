@@ -3,6 +3,7 @@ import json
 import sys
 import threading
 import time
+from collections import namedtuple
 
 import pytest
 
@@ -122,10 +123,16 @@ class Client:
         return status, json.loads(data)
 
 
+_DiskUsage = namedtuple("_DiskUsage", "total used free")
+
+
 @pytest.fixture
 def ui(tmp_path, monkeypatch):
     monkeypatch.delenv("HF_TOKEN", raising=False)
     monkeypatch.setattr(webui, "find_tool", lambda name: name)
+    # Uploads keep a 2 GB free-space reserve; do not let the machine running the
+    # tests (a small tmpfs, a nearly full disk) decide whether they pass.
+    monkeypatch.setattr(webui.shutil, "disk_usage", lambda path: _DiskUsage(10**13, 0, 10**13))
     settings = make_settings(tmp_path)
     server, app = webui.create_server(settings, port=18765)
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -183,6 +190,18 @@ def test_upload_goes_to_media_with_a_sanitised_name(ui):
 
     status, _ = client.json("POST", "/api/upload?name=bad.exe", b"abc")
     assert status == 400
+
+
+def test_upload_is_refused_when_the_disk_is_nearly_full(ui, monkeypatch):
+    settings, _, client = ui
+    monkeypatch.setattr(webui.shutil, "disk_usage", lambda path: _DiskUsage(10**13, 0, 1024**3))
+
+    status, data = client.json(
+        "POST", "/api/upload?name=x.mp3", b"abc", headers={"Content-Length": "3"}
+    )
+
+    assert status == 400
+    assert not (settings.media_dir / "x.mp3").exists()
 
 
 def test_history_lists_details_and_serves_only_known_files(ui):
