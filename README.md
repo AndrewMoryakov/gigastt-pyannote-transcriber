@@ -736,7 +736,7 @@ and check the words by ear.
 
 The package is version 0.1.0.
 
-- **Platform.** Windows 10/11 x64 only: the scripts are PowerShell and use winget; CI runs on `windows-latest`. No other platform is documented or tested.
+- **Platform.** Windows 10/11 x64 only: the scripts are PowerShell and use winget; the CI workflow targets `windows-latest`. No other platform is documented or tested.
 - **Language and speakers.** Russian speech; defaults tuned for four speakers on one microphone. The speaker count is given, not inferred.
 - **CPU only.** The pinned PyTorch build is `2.11.0+cpu`; there is no GPU path.
 - **Files are processed one at a time** by `run.ps1`, on purpose.
@@ -745,7 +745,8 @@ The package is version 0.1.0.
 - **Token on every run.** `HF_TOKEN` is required each time diarization runs, even when all weights are on disk.
 - **Network.** Installation and model download need the network. After that, processing is local; the code turns pyannote telemetry off by default, but a value already set in your environment wins.
 - **Accuracy.** Automatic transcription is not verbatim-accurate; overlapping speech and interruptions need manual proofreading.
-- **Tests.** A pytest suite covers the CLI and resume behaviour, diarization handling, the GigaSTT wrapper, the merge (including equivalence with reference implementations) and rendering; CI runs ruff, pytest and the hygiene check. The suites use stand-ins for the models, so a full end-to-end run on a real recording needs the real models and a token.
+- **Tests.** A pytest suite covers the CLI and resume behaviour, diarization handling, the GigaSTT wrapper, the merge (including equivalence with reference implementations) and rendering; the CI workflow runs ruff, pytest and the hygiene check. The suites use stand-ins for the models, so a full end-to-end run on a real recording needs the real models and a token.
+- **CI is not running.** GitHub Actions is unavailable for this account (billing), so the workflow does not execute and the badge does not reflect the code. Check changes locally before merging: `uv sync --locked --python 3.11`, then `.\scripts\test.ps1` (hygiene check, `ruff check src tests`, `pytest`). A few tests read the installed `pyannote.audio` and `torch` versions, so they need the project's own environment (`uv sync`) to pass.
 - **No release process is documented**; the repository is used from a checkout.
 
 ## Documentation map
