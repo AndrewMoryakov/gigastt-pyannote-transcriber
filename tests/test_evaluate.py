@@ -105,6 +105,22 @@ def test_explicit_bounds_override_the_reference_span():
     assert result["wer"] == 0
 
 
+@pytest.mark.parametrize(
+    "bounds",
+    [
+        {"start": 3.0, "end": 2.0},  # inverted
+        {"start": 2.0, "end": 2.0},  # empty
+        {"start": 100.0},  # start past the reference's own end
+        {"end": 0.5},  # end before the reference's own start
+    ],
+)
+def test_an_inverted_or_empty_window_is_refused_not_scored_as_all_deleted(bounds):
+    job = merged(("SPEAKER_00", "раз два три четыре пять шесть"))
+    reference = "[00:00:01–00:00:02] Отец: два три\n"
+    with pytest.raises(ReferenceError, match="window is empty"):
+        evaluate(job, reference, **bounds)
+
+
 def test_a_reference_without_timestamps_scores_the_whole_job():
     job = merged(("SPEAKER_00", "раз два три"))
     result = evaluate(job, "Отец: раз два три\n")

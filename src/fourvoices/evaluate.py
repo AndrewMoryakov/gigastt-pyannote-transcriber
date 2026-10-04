@@ -430,6 +430,13 @@ def evaluate(
     reference = parse_reference(reference_text)
     window_start = start if start is not None else reference.start
     window_end = end if end is not None else reference.end
+    if window_start is not None and window_end is not None and window_start >= window_end:
+        # No word can fall in an empty window, so every reference word would be
+        # reported as missed: a plausible-looking 100% WER that means nothing.
+        raise ReferenceError(
+            f"The evaluation window is empty: start {_seconds_text(window_start)} is not "
+            f"before end {_seconds_text(window_end)}. Check --start/--end."
+        )
     hypothesis = hypothesis_words(merged, window_start, window_end)
     result = score(reference.words, hypothesis)
     result["window"] = (
