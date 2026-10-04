@@ -140,6 +140,8 @@ class Recorder:
         self.asr = 0
         self.diarization = 0
         self.audio_overwrite = []
+        self.gigastt_version = "2.21.0"
+        self.transcript = TRANSCRIPT
 
 
 @pytest.fixture
@@ -170,8 +172,8 @@ def pipeline(tmp_path, monkeypatch):
 
     def fake_transcribe(audio_path, output_json, **kwargs):
         calls.asr += 1
-        cli._atomic_json(Path(output_json), TRANSCRIPT)
-        return dict(TRANSCRIPT)
+        cli._atomic_json(Path(output_json), calls.transcript)
+        return dict(calls.transcript)
 
     def fake_diarize(audio_path, output_json, **kwargs):
         calls.diarization += 1
@@ -181,6 +183,7 @@ def pipeline(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "prepare_audio", fake_prepare_audio)
     monkeypatch.setattr(cli, "transcribe", fake_transcribe)
     monkeypatch.setattr(cli, "diarize", fake_diarize)
+    monkeypatch.setattr(cli, "gigastt_version", lambda executable: calls.gigastt_version)
     monkeypatch.chdir(tmp_path)
     return calls, source, config, project
 
@@ -351,3 +354,322 @@ def test_thread_default_follows_the_machine_not_a_hardcoded_number():
 def test_an_explicit_thread_count_still_wins():
     args = cli.build_parser().parse_args(["run", "--input", "x", "--torch-threads", "4"])
     assert args.torch_threads == 4
+
+
+# ------------------------------------------------------- tool versions & cascade
+
+
+def read_manifest(job):
+    return json.loads((job / "manifest.json").read_text(encoding="utf-8"))
+
+
+def test_the_gigastt_version_is_recorded_with_the_asr_stage(pipeline):
+    _, source, config, _ = pipeline
+    job = run(source, config)
+
+    assert read_manifest(job)["stages"]["asr"]["gigastt_version"] == "2.21.0"
+
+
+def test_a_new_gigastt_redoes_asr_and_merge_but_keeps_diarization(pipeline, capsys):
+    calls, source, config, _ = pipeline
+    job = run(source, config)
+
+    calls.gigastt_version = "2.22.0"
+    calls.transcript = dict(
+        TRANSCRIPT,
+        text="первый третий",
+        words=[TRANSCRIPT["words"][0], dict(TRANSCRIPT["words"][1], word="третий")],
+    )
+    run(source, config)
+
+    assert (calls.asr, calls.diarization) == (2, 1)
+    assert "redoing it with 2.22.0" in capsys.readouterr().out
+    merged = json.loads((job / "intermediate" / "merged.json").read_text(encoding="utf-8"))
+    # The merge must follow the new words, not be reused from the old ASR.
+    assert [word["word"] for word in merged["words"]] == ["первый", "третий"]
+    assert read_manifest(job)["stages"]["asr"]["gigastt_version"] == "2.22.0"
+
+
+def test_an_asr_stage_without_a_recorded_version_is_redone(pipeline):
+    calls, source, config, _ = pipeline
+    job = run(source, config)
+    manifest = read_manifest(job)
+    del manifest["stages"]["asr"]["gigastt_version"]  # a job from an older release
+    (job / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    run(source, config)
+
+    assert (calls.asr, calls.diarization) == (2, 1)
+
+
+def test_an_unknown_current_version_reuses_asr_with_a_warning(pipeline, capsys):
+    calls, source, config, _ = pipeline
+    job = run(source, config)
+    calls.gigastt_version = None
+
+    run(source, config)
+
+    assert calls.asr == 1
+    assert "unverified" in capsys.readouterr().err
+    # The stage keeps the version it was actually produced with.
+    assert read_manifest(job)["stages"]["asr"]["gigastt_version"] == "2.21.0"
+
+
+def test_an_interrupted_rerun_does_not_leave_a_stale_merge_vouched_for(pipeline, monkeypatch):
+    calls, source, config, _ = pipeline
+    job = run(source, config)
+
+    calls.gigastt_version = "2.22.0"
+
+    def interrupted(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "merge_transcript", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        run(source, config)
+
+    stages = read_manifest(job)["stages"]
+    assert stages["asr"]["gigastt_version"] == "2.22.0"
+    assert "merge" not in stages and "render" not in stages
+
+
+def test_a_recomputed_diarization_invalidates_the_merge(pipeline):
+    calls, source, config, _ = pipeline
+    job = run(source, config)
+    manifest = read_manifest(job)
+    del manifest["stages"]["diarization"]
+    (job / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    merged_path = job / "intermediate" / "merged.json"
+    merged_path.write_text('{"words": [], "turns": [], "speakers": []}', encoding="utf-8")
+
+    run(source, config)
+
+    assert (calls.asr, calls.diarization) == (1, 2)
+    assert json.loads(merged_path.read_text(encoding="utf-8"))["words"]
+
+
+def test_library_versions_are_recorded_with_the_diarization(pipeline):
+    _, source, config, _ = pipeline
+    job = run(source, config)
+
+    stage = read_manifest(job)["stages"]["diarization"]
+    assert stage["pyannote_audio_version"]
+    assert stage["torch_version"]
+
+
+def test_a_library_upgrade_warns_but_keeps_the_diarization(pipeline, capsys):
+    calls, source, config, _ = pipeline
+    job = run(source, config)
+    manifest = read_manifest(job)
+    manifest["stages"]["diarization"]["pyannote_audio_version"] = "3.9.9"
+    (job / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    run(source, config)
+
+    assert calls.diarization == 1
+    assert "pyannote_audio 3.9.9 ->" in capsys.readouterr().err
+    # The record keeps describing the run that produced the diarization.
+    stage = read_manifest(job)["stages"]["diarization"]
+    assert stage["pyannote_audio_version"] == "3.9.9"
+
+
+def test_missing_punctuation_is_reported_and_recorded(pipeline, capsys):
+    calls, source, config, _ = pipeline
+    words = [
+        {"word": "слово", "start": index * 0.5, "end": index * 0.5 + 0.4, "confidence": 0.9}
+        for index in range(250)
+    ]
+    calls.transcript = {"duration": 130.0, "text": " ".join(["слово"] * 250), "words": words}
+
+    job = run(source, config)
+
+    assert "without a single sentence mark" in capsys.readouterr().err
+    assert read_manifest(job)["stages"]["asr"]["punctuation_missing"] is True
+
+
+def test_rerender_keeps_the_subtitle_limits_the_run_used(pipeline):
+    calls, source, config, _ = pipeline
+    words = [
+        {"word": word, "start": index * 0.25, "end": index * 0.25 + 0.2, "confidence": 0.9}
+        for index, word in enumerate(["раз", "два", "три", "четыре"])
+    ]
+    calls.transcript = {"duration": 2.0, "text": "раз два три четыре", "words": words}
+    config.write_text(
+        "project:\n  output_root: ../out\n"
+        "output:\n  subtitle_max_seconds: 0.2\n  mark_uncertain_words: false\n",
+        encoding="utf-8",
+    )
+    job = run(source, config)
+    before = (job / "transcript.srt").read_text(encoding="utf-8")
+
+    args = cli.build_parser().parse_args(
+        ["render", "--job-dir", str(job), "--speaker-name", "SPEAKER_00=Отец"]
+    )
+    cli._render_job(args)
+
+    after = (job / "transcript.srt").read_text(encoding="utf-8")
+    assert before.count("-->") > 1  # the 0.2 s limit really split the turn
+    assert after.count("-->") == before.count("-->")
+    stage = read_manifest(job)["stages"]["render"]
+    assert (stage["subtitle_max_seconds"], stage["mark_uncertain"]) == (0.2, False)
+
+
+def test_rerender_flags_still_override_the_recorded_settings(pipeline):
+    _, source, config, _ = pipeline
+    job = run(source, config)
+
+    args = cli.build_parser().parse_args(
+        ["render", "--job-dir", str(job), "--subtitle-max-seconds", "0", "--no-mark-uncertain"]
+    )
+    cli._render_job(args)
+
+    stage = read_manifest(job)["stages"]["render"]
+    assert (stage["subtitle_max_seconds"], stage["mark_uncertain"]) == (0.0, False)
+
+
+# ------------------------------------------------------------------- doctor
+
+
+@pytest.fixture
+def installed(tmp_path, monkeypatch):
+    """A project with every model on disk and a pinned GigaSTT."""
+
+    project = tmp_path / "project"
+    (project / "config").mkdir(parents=True)
+    (project / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+    (project / "tools").mkdir()
+    (project / "tools" / "tools.lock.json").write_text(
+        json.dumps({"gigastt": {"version": "2.21.0"}}), encoding="utf-8"
+    )
+    config = write_config(
+        project / "config" / "default.yaml",
+        "asr:\n  model_dir: models/gigastt\ndiarization:\n  model_dir: models/pyannote\n",
+    )
+    giga = project / "models" / "gigastt"
+    for name in cli.GIGASTT_MODEL_FILES:
+        (giga / name).parent.mkdir(parents=True, exist_ok=True)
+        (giga / name).write_bytes(b"x")
+    snapshot = (
+        project / "models" / "pyannote" / "models--pyannote--speaker-diarization-community-1"
+        / "snapshots" / cli.MODEL_REVISION
+    )
+    snapshot.mkdir(parents=True)
+    (snapshot / "config.yaml").write_text("pipeline: {}\n", encoding="utf-8")
+    exe = project / "gigastt.exe"
+    exe.write_bytes(b"MZ")
+    versions = {"gigastt": "2.21.0"}
+    monkeypatch.setattr(cli, "gigastt_version", lambda executable: versions["gigastt"])
+    monkeypatch.setattr(cli.shutil, "which", lambda name: f"C:/bin/{name}.exe")
+    monkeypatch.setenv("HF_TOKEN", "hf_" + "a" * 30)
+    return project, config, exe, versions
+
+
+def doctor(config, exe):
+    args = cli.build_parser().parse_args(
+        ["doctor", "--config", str(config), "--gigastt-exe", str(exe)]
+    )
+    return cli._doctor(args)
+
+
+def test_doctor_passes_when_everything_is_in_place(installed, capsys):
+    _, config, exe, _ = installed
+    assert doctor(config, exe) == 0
+    assert "[FAIL]" not in capsys.readouterr().out
+
+
+def test_doctor_notices_a_missing_punctuation_model(installed, capsys):
+    project, config, exe, _ = installed
+    (project / "models" / "gigastt" / "punct" / "rupunct_small_int8.onnx").unlink()
+
+    assert doctor(config, exe) == 2
+    assert "[FAIL] GigaSTT models: missing punct/rupunct_small_int8.onnx" in (
+        capsys.readouterr().out
+    )
+
+
+def test_doctor_notices_an_unpinned_pyannote_revision(installed, capsys):
+    project, config, exe, _ = installed
+    snapshots = (
+        project / "models" / "pyannote" / "models--pyannote--speaker-diarization-community-1"
+        / "snapshots"
+    )
+    (snapshots / cli.MODEL_REVISION).rename(snapshots / ("0" * 40))
+
+    assert doctor(config, exe) == 2
+    assert "[FAIL] pyannote model" in capsys.readouterr().out
+
+
+def test_doctor_notices_a_gigastt_that_does_not_match_the_lock(installed, capsys):
+    _, config, exe, versions = installed
+    versions["gigastt"] = "2.15.0"
+
+    assert doctor(config, exe) == 2
+    assert "tools.lock.json pins 2.21.0" in capsys.readouterr().out
+
+
+# ------------------------------------------------ independent-review follow-ups
+
+
+def test_an_interrupted_new_asr_leaves_the_old_job_renderable(pipeline, monkeypatch):
+    calls, source, config, _ = pipeline
+    job = run(source, config)
+    calls.gigastt_version = "2.22.0"
+
+    def interrupted(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    # E.g. Ctrl+C during a recognition the user did not expect after an upgrade.
+    monkeypatch.setattr(cli, "transcribe", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        run(source, config)
+
+    stages = read_manifest(job)["stages"]
+    # Nothing new was recorded, so the old ASR + merge pair is still consistent.
+    assert stages["asr"]["gigastt_version"] == "2.21.0"
+    assert "merge" in stages
+    args = cli.build_parser().parse_args(["render", "--job-dir", str(job)])
+    cli._render_job(args)
+    assert "render" in read_manifest(job)["stages"]
+
+
+def test_render_refuses_a_merge_the_manifest_no_longer_vouches_for(pipeline, monkeypatch):
+    calls, source, config, _ = pipeline
+    job = run(source, config)
+    calls.gigastt_version = "2.22.0"
+
+    def interrupted(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "merge_transcript", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        run(source, config)
+
+    args = cli.build_parser().parse_args(["render", "--job-dir", str(job)])
+    with pytest.raises(cli.PipelineError, match="does not vouch"):
+        cli._render_job(args)
+    assert "render" not in read_manifest(job)["stages"]
+
+
+def test_uncertainty_marks_can_be_switched_back_on(pipeline):
+    _, source, config, _ = pipeline
+    job = run(source, config)
+
+    steps = (("--no-mark-uncertain", False), (None, False), ("--mark-uncertain", True))
+    for flag, expected in steps:
+        argv = ["render", "--job-dir", str(job)] + ([flag] if flag else [])
+        cli._render_job(cli.build_parser().parse_args(argv))
+        assert read_manifest(job)["stages"]["render"]["mark_uncertain"] is expected
+
+
+def test_doctor_does_not_demand_models_the_configuration_switches_off(installed, capsys):
+    project, config, exe, _ = installed
+    config.write_text(
+        "asr:\n  model_dir: models/gigastt\n  punctuation: false\n  vad: false\n"
+        "diarization:\n  model_dir: models/pyannote\n",
+        encoding="utf-8",
+    )
+    for name in cli.GIGASTT_PUNCTUATION_FILES + cli.GIGASTT_VAD_FILES:
+        (project / "models" / "gigastt" / name).unlink()
+
+    assert doctor(config, exe) == 0
+    assert "[FAIL]" not in capsys.readouterr().out

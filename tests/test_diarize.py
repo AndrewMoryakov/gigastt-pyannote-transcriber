@@ -34,7 +34,12 @@ class _Pipeline:
     def to(self, device):
         return self
 
-    def __call__(self, _audio, num_speakers=None):
+    def __call__(self, _audio, num_speakers=None, hook=None):
+        # Drive the hook the way pyannote 4 does: counted calls, then a bare one.
+        if hook is not None:
+            hook("segmentation", None, total=4, completed=0)
+            hook("segmentation", None, total=4, completed=5)  # batches overshoot
+            hook("segmentation", object())
         return _Output(self._tracks)
 
 
@@ -114,3 +119,31 @@ def test_matching_speaker_count_is_silent(tmp_path, monkeypatch, capsys):
 
     assert payload["speaker_count_matches_request"] is True
     assert capsys.readouterr().err == ""
+
+
+def test_telemetry_stays_off_even_if_the_shell_turned_it_on():
+    import os
+    import subprocess
+    import sys
+
+    # A fresh interpreter: reloading the module here would replace the exception
+    # classes other modules already imported from it.
+    env = dict(os.environ, PYANNOTE_METRICS_ENABLED="1", HF_HUB_DISABLE_TELEMETRY="0")
+    script = (
+        "import os, fourvoices.diarize; "
+        "print(os.environ['PYANNOTE_METRICS_ENABLED'], os.environ['HF_HUB_DISABLE_TELEMETRY'])"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", script], env=env, capture_output=True, text=True, check=True
+    )
+    assert completed.stdout.split() == ["0", "1"]
+
+
+def test_diarization_reports_its_progress(monkeypatch, tmp_path, capsys):
+    source = _install_stubs(monkeypatch, tmp_path, TWO_SPEAKERS)
+
+    diarize_module.diarize(source, tmp_path / "out.json", num_speakers=2)
+
+    out = capsys.readouterr().out
+    assert "pyannote: segmentation 0%" in out
+    assert "pyannote: segmentation done" in out
