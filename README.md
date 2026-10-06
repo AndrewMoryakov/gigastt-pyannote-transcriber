@@ -368,11 +368,33 @@ compares a finished job with a reference you trust and reports two numbers:
   it always counts as an error.
 
 The reference is a text file in the shape of `transcript.txt`: one turn per
-line, `[hh:mm:ss–hh:mm:ss] Name: text`. The timestamp is optional, markers such
-as `[перекрытие речи]` are ignored, a line without `Name:` continues the
-previous speaker, and lines starting with `#` are comments. Nobody transcribes
-two hours by hand, so a reference normally covers a fragment: only the words
-inside its time span are scored (or pass `-Start`/`-End`).
+line, `[hh:mm:ss–hh:mm:ss] Name: text`. Markers such as `[перекрытие речи]` are
+ignored, a line without `Name:` continues the previous speaker, and lines
+starting with `#` are comments. Nobody transcribes two hours by hand, so a
+reference normally covers a fragment: only the words inside the span of its
+timestamps are scored (or pass both `-Start` and `-End`, which take
+precedence).
+
+A colon alone does not start a turn, because text can contain one. `Name:`
+begins a turn when the line has a timestamp, when that name has already spoken
+earlier in the file, or when it is the first line of the file:
+
+```text
+[00:10:02–00:10:09] Отец: начнём, как договорились
+я сказал: нет, не сегодня
+[00:10:10–00:10:12] Мать: хорошо
+Отец: тогда завтра
+```
+
+Here the second line goes on with the first turn (`я сказал` is not a name),
+and the last line is a new turn by `Отец`, who has spoken before. A new speaker's
+first turn therefore needs a timestamp. On any other line a prefix of more than
+four words, or one that starts with a lowercase letter, is ordinary text; a
+short capitalised one is refused with its line number, because it could be a new
+speaker or the start of a sentence: add a timestamp to it, or join it to the
+previous line. A reference with no timestamps at all can name only one speaker;
+to type a conversation from scratch, give each speaker's first turn a
+timestamp (any value will do) and pass `-Start` and `-End`.
 
 ```powershell
 # Make a reference: copy the transcript, keep a fragment of a few minutes,

@@ -42,7 +42,7 @@ def test_normalisation_ignores_case_punctuation_and_yo():
 
 
 def test_cluster_labels_are_mapped_to_names_whatever_their_order():
-    reference = "Отец: да нет\nМать: может быть\nОтец: конечно\n"
+    reference = "Отец: да нет\n[00:00:00–00:00:10] Мать: может быть\nОтец: конечно\n"
     job = merged(
         ("SPEAKER_01", "да нет"), ("SPEAKER_00", "может быть"), ("SPEAKER_01", "конечно")
     )
@@ -55,7 +55,7 @@ def test_cluster_labels_are_mapped_to_names_whatever_their_order():
 
 
 def test_a_wrongly_attributed_word_is_counted():
-    reference = "Отец: да нет\nМать: может быть\n"
+    reference = "Отец: да нет\n[00:00:00–00:00:10] Мать: может быть\n"
     job = merged(("SPEAKER_01", "да нет может"), ("SPEAKER_00", "быть"))
 
     result = evaluate(job, reference)
@@ -237,6 +237,85 @@ def test_a_long_phrase_before_a_colon_is_speech_not_a_name():
     assert ("итоги", "Отец") in reference.words
 
 
+def test_a_colon_in_continuation_text_is_not_a_speaker_label():
+    # "я сказал: нет" is what the turn goes on saying, not a speaker "я сказал".
+    reference = parse_reference("Отец: начнём\nя сказал: нет\nа потом ушёл\n")
+
+    assert reference.words == [
+        ("начнем", "Отец"), ("я", "Отец"), ("сказал", "Отец"), ("нет", "Отец"),
+        ("а", "Отец"), ("потом", "Отец"), ("ушел", "Отец"),
+    ]
+
+
+def test_a_colon_in_continuation_text_does_not_corrupt_the_scores():
+    job = merged(("SPEAKER_00", "начнём я сказал нет"))
+
+    result = evaluate(job, "Отец: начнём\nя сказал: нет\n")
+
+    assert result["wer"] == 0
+    assert result["speaker_mapping"] == {"SPEAKER_00": "Отец"}
+    assert result["speaker_accuracy"] == 1.0
+    assert list(result["per_speaker"]) == ["Отец"]
+
+
+def test_a_new_name_on_an_untimestamped_line_is_refused():
+    # Continuing the previous turn or starting Мать's: nothing in the line says
+    # which, and guessing would score the words against the wrong person.
+    with pytest.raises(ReferenceError, match=r"Line 2.*Мать.*timestamp"):
+        parse_reference("Отец: да\nМать: нет\n")
+
+
+def test_capitalised_prose_before_a_colon_is_refused_not_guessed():
+    # It looks like a label, so the author has to settle it; the message says how.
+    with pytest.raises(ReferenceError, match=r"Line 2.*Он сказал.*replace the colon"):
+        parse_reference("Отец: да\nОн сказал: нет\n")
+
+
+def test_a_timestamped_line_may_introduce_a_new_speaker():
+    reference = parse_reference("Отец: да\n[00:00:05–00:00:06] Мать: нет\n")
+
+    assert reference.words == [("да", "Отец"), ("нет", "Мать")]
+    assert (reference.start, reference.end) == (5.0, 7.0)
+
+
+def test_a_known_name_on_an_untimestamped_line_starts_a_new_turn():
+    reference = parse_reference(
+        "Отец: раз\n[00:00:05–00:00:06] Мать: два\nОтец: три\nМать: четыре\nпять\n"
+    )
+
+    assert reference.words == [
+        ("раз", "Отец"), ("два", "Мать"), ("три", "Отец"), ("четыре", "Мать"),
+        ("пять", "Мать"),
+    ]
+
+
+def test_a_timestamp_that_only_introduces_a_speaker_can_be_overridden_by_the_window():
+    # How a conversation typed from scratch is scored: timestamps only so that
+    # each speaker is named, and the window given explicitly.
+    job = merged(("SPEAKER_00", "раз два"), ("SPEAKER_01", "три"))
+
+    reference = "Отец: раз два\n[00:09:00–00:09:01] Мать: три\n"
+
+    result = evaluate(job, reference, start=0.0, end=10.0)
+
+    assert result["window"] == [0.0, 10.0]
+    assert (result["wer"], result["speaker_accuracy"]) == (0, 1.0)
+
+
+def test_the_first_line_may_name_the_first_speaker_without_a_timestamp():
+    assert parse_reference("Отец: раз\n").words == [("раз", "Отец")]
+
+
+def test_only_the_start_of_a_line_is_looked_at_for_a_speaker_name():
+    # A colon after the first one is text, even if it follows a known name.
+    reference = parse_reference(
+        "Отец: раз\n[00:00:05–00:00:06] Мать: два\nОтец: она сказала Мать: три\n"
+    )
+
+    assert [word for word, _ in reference.words[-4:]] == ["она", "сказала", "мать", "три"]
+    assert {speaker for _, speaker in reference.words[-4:]} == {"Отец"}
+
+
 def test_words_before_any_speaker_are_rejected():
     with pytest.raises(ReferenceError, match="no speaker"):
         parse_reference("просто текст без имени\n")
@@ -311,7 +390,7 @@ def test_missed_words_at_the_very_end_take_the_last_time():
 def test_mapping_follows_the_words_not_the_alphabet():
     # Alphabetically "Мать" < "Отец", so a first-fit by name order would give
     # SPEAKER_00 to "Мать"; the words say otherwise.
-    reference = "Отец: да нет\nМать: может быть\n"
+    reference = "Отец: да нет\n[00:00:00–00:00:10] Мать: может быть\n"
     job = merged(("SPEAKER_00", "да нет"), ("SPEAKER_01", "может быть"))
 
     result = evaluate(job, reference)
@@ -322,7 +401,7 @@ def test_mapping_follows_the_words_not_the_alphabet():
 
 def test_unknown_is_not_mapped_even_where_it_would_fit():
     # Were UNKNOWN a cluster like any other, it would take "Мать" and score 100 %.
-    reference = "Отец: раз два три\nМать: четыре\n"
+    reference = "Отец: раз два три\n[00:00:00–00:00:10] Мать: четыре\n"
     job = merged(("SPEAKER_00", "раз два три"), ("UNKNOWN", "четыре"))
 
     result = evaluate(job, reference)

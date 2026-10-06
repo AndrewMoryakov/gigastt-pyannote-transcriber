@@ -1,11 +1,15 @@
 """Score a finished job against a reference transcript checked by ear.
 
 The reference is plain text in the shape of ``transcript.txt``: one turn per
-line, ``[hh:mm:ss–hh:mm:ss] Name: text``. The timestamp is optional, markers
-such as ``[перекрытие речи]`` after the name are ignored, and a line without a
-``Name:`` continues the previous speaker. Nobody transcribes two hours by hand,
-so a reference usually covers a fragment: only hypothesis words whose midpoint
-falls inside the reference's time span are scored.
+line, ``[hh:mm:ss–hh:mm:ss] Name: text``. Markers such as
+``[перекрытие речи]`` after the name are ignored, and a line without a
+``Name:`` continues the previous speaker. A colon alone does not make a name,
+because text may contain one ("я сказал: нет"): ``Name:`` starts a turn only on
+a timestamped line, or when that name has already been a speaker, or on the
+first line. Any other short, capitalised prefix is refused, not guessed at.
+Nobody transcribes two hours by hand, so a reference usually covers a
+fragment: only hypothesis words whose midpoint falls inside the reference's
+time span are scored.
 
 Two numbers come from one word alignment:
 
@@ -102,9 +106,40 @@ class Reference:
     end: float | None
 
 
+def _starts_turn(
+    name: str, *, timestamped: bool, known: set[str], in_turn: bool, number: int
+) -> bool:
+    """Whether ``name`` before the first ``: `` of a line is a speaker label.
+
+    A colon is also ordinary punctuation, so the prefix alone proves nothing. It
+    is a label if it is short and the line is timestamped (``transcript.txt``
+    always writes one), the name has been a speaker before, or no turn has begun
+    yet. Left over is a short prefix of an untimestamped line in the middle of a
+    turn, naming nobody known: lowercase ("я сказал: нет") is speech, since a
+    wrapped line goes on mid-sentence; anything else could be either, and
+    guessing would score the words against the wrong person, so it is refused.
+    """
+
+    if not name or len(name.split()) > MAX_NAME_WORDS:
+        return False  # "Итак, подведём итоги по проекту: ..." is speech.
+    if timestamped or name in known or not in_turn:
+        return True
+    if name[0].islower():
+        return False
+    raise ReferenceError(
+        f"Line {number} starts with '{name}:', which is not a speaker named earlier "
+        "and has no timestamp, so it is unclear whether it begins a new turn or "
+        "continues the previous one. If it is a new speaker, give the line a "
+        f"timestamp ([hh:mm:ss–hh:mm:ss] {name}: ...) or start that speaker's "
+        "first turn with one earlier in the file; if it is text that contains a "
+        "colon, join it to the previous line or replace the colon."
+    )
+
+
 def parse_reference(text: str) -> Reference:
     words: list[tuple[str, str]] = []
     speaker: str | None = None
+    known: set[str] = set()
     starts: list[float] = []
     ends: list[float] = []
     for number, line in enumerate(text.splitlines(), start=1):
@@ -114,15 +149,23 @@ def parse_reference(text: str) -> Reference:
         assert match is not None  # every group is optional
         start, end, name = match.group(1), match.group(2), match.group("name")
         body = match.group("text")
-        if name is not None and len(name.split()) > MAX_NAME_WORDS:
-            # "Итак, подведём итоги по проекту: ..." is speech, not a label.
-            body = line[match.start("name") :]
-            name = None
+        if name is not None:
+            name = name.strip()
+            if not _starts_turn(
+                name,
+                timestamped=start is not None,
+                known=known,
+                in_turn=speaker is not None,
+                number=number,
+            ):
+                body = line[match.start("name") :]
+                name = None
         if start is not None:
             starts.append(parse_seconds(start))
             ends.append(parse_seconds(end))
         if name is not None:
-            speaker = name.strip()
+            speaker = name
+            known.add(name)
         line_words = tokens(_BRACKETS.sub(" ", body))
         if line_words and speaker is None:
             raise ReferenceError(
