@@ -1,4 +1,5 @@
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -673,3 +674,130 @@ def test_doctor_does_not_demand_models_the_configuration_switches_off(installed,
 
     assert doctor(config, exe) == 0
     assert "[FAIL]" not in capsys.readouterr().out
+
+
+# ------------------------------------------------------- diarization switched off
+
+
+def test_no_diarization_never_touches_pyannote(pipeline):
+    calls, source, config, _ = pipeline
+
+    job = run(source, config, "--no-diarization")
+
+    assert calls.diarization == 0
+    assert not (job / "intermediate" / "pyannote.json").exists()
+    stages = read_manifest(job)["stages"]
+    assert stages["diarization"]["skipped"] is True
+    merged = json.loads((job / "intermediate" / "merged.json").read_text(encoding="utf-8"))
+    assert merged["speakers"] == ["SPEAKER_00"]
+    assert {word["assignment"] for word in merged["words"]} == {None}
+    assert "[?]" not in (job / "transcript.txt").read_text(encoding="utf-8")
+    assert "SPEAKER_00" in (job / "transcript.txt").read_text(encoding="utf-8")
+
+
+def test_the_configuration_can_switch_diarization_off(pipeline):
+    calls, source, config, _ = pipeline
+    config.write_text(
+        "project:\n  output_root: ../out\ndiarization:\n  enabled: false\n",
+        encoding="utf-8",
+    )
+
+    run(source, config)
+
+    assert calls.diarization == 0
+
+
+def test_the_command_line_overrides_the_configuration_in_both_directions(pipeline):
+    calls, source, config, _ = pipeline
+    config.write_text(
+        "project:\n  output_root: ../out\ndiarization:\n  enabled: false\n",
+        encoding="utf-8",
+    )
+
+    run(source, config, "--diarization")
+    assert calls.diarization == 1
+
+    config.write_text("project:\n  output_root: ../out\n", encoding="utf-8")
+    run(source, config, "--no-diarization", "--force")
+    assert calls.diarization == 1
+
+
+def test_a_non_boolean_enabled_is_refused(pipeline):
+    _, source, config, _ = pipeline
+    config.write_text(
+        "project:\n  output_root: ../out\ndiarization:\n  enabled: maybe\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(cli.PipelineError, match="diarization.enabled"):
+        run(source, config)
+
+
+def test_switching_diarization_for_an_existing_job_needs_force(pipeline):
+    calls, source, config, _ = pipeline
+    run(source, config)
+
+    with pytest.raises(cli.PipelineError, match="use --force"):
+        run(source, config, "--no-diarization")
+
+    job = run(source, config, "--no-diarization", "--force")
+    with pytest.raises(cli.PipelineError, match="use --force"):
+        run(source, config)
+    assert read_manifest(job)["config"]["diarization"] is False
+
+
+def test_a_job_made_before_the_option_existed_still_resumes(pipeline):
+    calls, source, config, _ = pipeline
+    job = run(source, config)
+
+    assert "diarization" not in read_manifest(job)["config"]
+    run(source, config)
+    assert (calls.asr, calls.diarization) == (1, 1)
+
+
+def test_speaker_count_does_not_rebuild_a_job_without_diarization(pipeline):
+    calls, source, config, _ = pipeline
+    run(source, config, "--no-diarization", "--num-speakers", "2")
+
+    run(source, config, "--no-diarization", "--num-speakers", "3")
+
+    assert calls.asr == 1
+
+
+def test_a_rerun_without_diarization_reuses_asr_and_merge(pipeline, capsys):
+    calls, source, config, _ = pipeline
+    run(source, config, "--no-diarization")
+    capsys.readouterr()
+
+    run(source, config, "--no-diarization")
+
+    assert calls.asr == 1
+    assert "[4/5] Reusing merged transcript." in capsys.readouterr().out
+
+
+def test_doctor_does_not_demand_pyannote_or_a_token_without_diarization(
+    installed, monkeypatch, capsys
+):
+    project, config, exe, _ = installed
+    shutil.rmtree(project / "models" / "pyannote")
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+
+    def version(name):
+        if name in {"pyannote.audio", "torch"}:
+            raise cli.importlib.metadata.PackageNotFoundError(name)
+        return "1.0"
+
+    monkeypatch.setattr(cli.importlib.metadata, "version", version)
+
+    def check(*flags):
+        args = cli.build_parser().parse_args(
+            ["doctor", "--config", str(config), "--gigastt-exe", str(exe), *flags]
+        )
+        return cli._doctor(args)
+
+    assert check() == 2
+    capsys.readouterr()
+    assert check("--no-diarization") == 0
+    output = capsys.readouterr().out
+    assert "[FAIL]" not in output
+    assert "pyannote" not in output and "HF_TOKEN" not in output

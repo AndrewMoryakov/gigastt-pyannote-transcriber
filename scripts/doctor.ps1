@@ -1,5 +1,8 @@
 ﻿[CmdletBinding()]
-param()
+param(
+    # Do not demand HF_TOKEN, pyannote or torch (see run.ps1 -NoDiarization).
+    [switch]$NoDiarization
+)
 
 . (Join-Path $PSScriptRoot 'common.ps1')
 $repo = Get-RepoRoot
@@ -25,7 +28,10 @@ if (Test-Path -LiteralPath $exe) {
 else {
     $problems.Add('Не найден gigastt.exe. Запустите .\scripts\download-models.ps1.')
 }
-if (-not $env:HF_TOKEN -or $env:HF_TOKEN -eq 'hf_REPLACE_WITH_YOUR_READ_TOKEN') {
+if ($NoDiarization) {
+    Write-Host '[--] HF_TOKEN не проверяется: диаризация выключена.'
+}
+elseif (-not $env:HF_TOKEN -or $env:HF_TOKEN -eq 'hf_REPLACE_WITH_YOUR_READ_TOKEN') {
     $problems.Add('Не задан настоящий HF_TOKEN для текущего процесса (или в локальном .env).')
 }
 else {
@@ -37,7 +43,13 @@ if ($problems.Count -gt 0) {
     throw "Doctor обнаружил проблем: $($problems.Count)."
 }
 
-Invoke-UvModule doctor `
-    --config (Join-Path $repo 'config\default.yaml') `
-    --gigastt-exe $exe `
-    --model-dir (Join-Path $repo 'models\gigastt')
+$doctorArguments = @(
+    'doctor',
+    '--config', (Join-Path $repo 'config\default.yaml'),
+    '--gigastt-exe', $exe,
+    '--model-dir', (Join-Path $repo 'models\gigastt')
+)
+if ($NoDiarization) {
+    $doctorArguments += '--no-diarization'
+}
+Invoke-UvModule @doctorArguments

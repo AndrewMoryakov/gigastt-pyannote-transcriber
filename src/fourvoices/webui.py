@@ -283,6 +283,7 @@ class JobManager:
     def command(self, job: Job) -> list[str]:
         s = self.settings
         opts = job.options
+        diarize = opts.get("diarize", True)
         command = cli_command(
             "run",
             "--input", str(s.media_dir / job.file),
@@ -290,10 +291,13 @@ class JobManager:
             "--config", str(s.config),
             "--gigastt-exe", str(s.gigastt_exe),
             "--model-dir", str(s.gigastt_model_dir),
-            "--num-speakers", str(opts["num_speakers"]),
             "--ffmpeg", find_tool("ffmpeg") or "ffmpeg",
             "--ffprobe", find_tool("ffprobe") or "ffprobe",
+            # Always explicit: the UI's choice must win over diarization.enabled.
+            "--diarization" if diarize else "--no-diarization",
         )  # fmt: skip
+        if diarize:
+            command += ["--num-speakers", str(opts["num_speakers"])]
         if opts.get("allow_downmix"):
             command.append("--allow-downmix")
         if opts.get("force"):
@@ -446,6 +450,7 @@ class App:
             and (s.gigastt_model_dir / "v3_rnnt_encoder_int8.onnx").is_file(),
             "pyannote": any((s.pyannote_dir).glob("models--*/snapshots/*")),
         }
+        ffmpeg_ok = bool(find_tool("ffmpeg"))
         with contextlib.suppress(OSError):
             s.media_dir.mkdir(exist_ok=True)
         free = shutil.disk_usage(s.repo).free
@@ -456,7 +461,10 @@ class App:
             },
             "ffmpeg": bool(find_tool("ffmpeg") and find_tool("ffprobe")),
             "models": models,
-            "ready": all(models.values()) and bool(find_tool("ffmpeg")),
+            "ready": all(models.values()) and ffmpeg_ok,
+            # Transcription without speaker separation needs neither the
+            # pyannote model nor the Hugging Face token.
+            "ready_without_diarization": models["gigastt"] and ffmpeg_ok,
             "free_gb": round(free / 1024**3, 1),
             "media": sorted(
                 (p.name for p in s.media_dir.iterdir() if p.suffix.lower() in AUDIO_EXTENSIONS),
@@ -642,10 +650,13 @@ class Handler(BaseHTTPRequestHandler):
     def _start_job(self, _query: dict[str, list[str]]) -> None:
         app = self.app
         body = self._body_json()
-        if not TOKEN_RE.match(app.token()):
+        diarize = body.get("diarize", True)
+        if not isinstance(diarize, bool):
+            raise ValueError("Поле diarize должно быть true или false")
+        if diarize and not TOKEN_RE.match(app.token()):
             raise ValueError("Сначала сохраните токен Hugging Face.")
         status = app.status()
-        if not status["ready"]:
+        if not status["ready" if diarize else "ready_without_diarization"]:
             raise ValueError("Окружение не готово: проверьте ffmpeg и модели.")
         name = Path(str(body.get("file", ""))).name
         if name != body.get("file") or not (app.settings.media_dir / name).is_file():
@@ -656,6 +667,7 @@ class Handler(BaseHTTPRequestHandler):
         job = app.jobs.submit(
             name,
             {
+                "diarize": diarize,
                 "num_speakers": speakers,
                 "allow_downmix": bool(body.get("allow_downmix")),
                 "force": bool(body.get("force")),

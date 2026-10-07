@@ -68,7 +68,7 @@
 <main>
   <section class="card" id="tokenCard" hidden>
     <h2>1. Токен Hugging Face</h2>
-    <p class="muted">Нужен read-токен (<a href="https://huggingface.co/settings/tokens" target="_blank" rel="noopener">создать</a>)
+    <p class="muted">Нужен только для разделения по говорящим. Read-токен (<a href="https://huggingface.co/settings/tokens" target="_blank" rel="noopener">создать</a>)
       и принятые условия модели
       <a href="https://huggingface.co/pyannote/speaker-diarization-community-1" target="_blank" rel="noopener">pyannote/speaker-diarization-community-1</a>.
       Токен сохраняется в локальный файл <code>.env</code> (в Git он не попадает).</p>
@@ -103,6 +103,8 @@
       </div>
     </div>
     <div class="row" style="margin-top:14px">
+      <label title="Без разделения pyannote не запускается: нужен только GigaSTT, токен не требуется, весь текст идёт одним говорящим">
+        <input type="checkbox" id="diarize" checked> разделять по говорящим</label>
       <label>Говорящих: <input type="number" id="speakers" min="1" max="32" value="2"></label>
       <label><input type="checkbox" id="downmix"> сводить стерео в моно</label>
       <label title="Нужно, если вы меняете число говорящих у уже обработанного файла">
@@ -167,22 +169,35 @@ let status = null, activeJob = null, pollTimer = null, selectedFile = null, reco
 let detailId = null, detailFiles = [], currentTab = null;
 
 // ---------------------------------------------------------------- status & token
+const diarizeOn = () => $("diarize").checked;
+// Without speaker separation neither the pyannote model nor the token is needed.
+function renderStatus() {
+  if (!status) return;
+  const on = diarizeOn(), m = status.models;
+  $("speakers").disabled = !on;
+  if (on) chip("chipToken", status.token.set, status.token.set ? "токен " + status.token.masked : "нет токена");
+  else chip("chipToken", true, "токен не нужен");
+  chip("chipFfmpeg", status.ffmpeg, status.ffmpeg ? "ffmpeg" : "ffmpeg не найден");
+  const modelsOk = m.gigastt && (m.pyannote || !on);
+  chip("chipModels", modelsOk, modelsOk ? "модели готовы" : "модели не скачаны");
+  $("free").textContent = "свободно " + status.free_gb + " ГБ";
+  $("tokenCard").hidden = status.token.set || !on;
+  if (!modelsOk)
+    say("goMsg", "Модели не скачаны: запустите scripts\\download-models.ps1.", "bad");
+  else if (!status.ffmpeg) say("goMsg", "ffmpeg/ffprobe не найден в PATH.", "bad");
+  else if ($("goMsg").classList.contains("bad")) say("goMsg", "");
+}
+$("diarize").onchange = () => {
+  try { localStorage.setItem("diarize", diarizeOn() ? "1" : "0"); } catch (e) { /* ignore */ }
+  renderStatus();
+};
 async function loadStatus() {
   status = await api("/api/status");
-  chip("chipToken", status.token.set, status.token.set ? "токен " + status.token.masked : "нет токена");
-  chip("chipFfmpeg", status.ffmpeg, status.ffmpeg ? "ffmpeg" : "ffmpeg не найден");
-  const m = status.models;
-  chip("chipModels", m.gigastt && m.pyannote,
-       m.gigastt && m.pyannote ? "модели готовы" : "модели не скачаны");
-  $("free").textContent = "свободно " + status.free_gb + " ГБ";
-  $("tokenCard").hidden = status.token.set;
   const select = $("mediaSelect"), current = select.value;
   select.innerHTML = '<option value="">—</option>' +
     status.media.map((n) => `<option>${n.replace(/</g, "&lt;")}</option>`).join("");
   select.value = status.media.includes(current) ? current : "";
-  if (!status.models.gigastt || !status.models.pyannote)
-    say("goMsg", "Модели не скачаны: запустите scripts\\download-models.ps1.", "bad");
-  else if (!status.ffmpeg) say("goMsg", "ffmpeg/ffprobe не найден в PATH.", "bad");
+  renderStatus();
 }
 $("chipToken").onclick = () => { $("tokenCard").hidden = false; };
 $("tokenSave").onclick = async () => {
@@ -277,7 +292,7 @@ $("go").onclick = async () => {
       name = (await upload(selectedFile)).file;
     }
     const job = await api("/api/jobs", { method: "POST", json: {
-      file: name, num_speakers: Number($("speakers").value),
+      file: name, diarize: diarizeOn(), num_speakers: Number($("speakers").value),
       allow_downmix: $("downmix").checked, force: $("force").checked } });
     localStorage.setItem("speakers", $("speakers").value);
     say("goMsg", "Задание запущено.", "ok");
@@ -370,6 +385,7 @@ $("namesSave").onclick = async () => {
 // ---------------------------------------------------------------- start
 (async () => {
   $("speakers").value = localStorage.getItem("speakers") || "2";
+  $("diarize").checked = localStorage.getItem("diarize") !== "0";
   await loadStatus(); await loadHistory();
   const jobs = await api("/api/jobs");
   const live = jobs.find((j) => ["queued", "running"].includes(j.state)) || jobs[0];

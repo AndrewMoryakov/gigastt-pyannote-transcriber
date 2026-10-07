@@ -38,6 +38,11 @@ asr:
   vad: true
 
 diarization:
+  # Set to false (or pass --no-diarization) to transcribe without pyannote: it and
+  # torch are not started, no Hugging Face token is needed; every word is
+  # attributed to one speaker (SPEAKER_00). The command line wins over this setting, and
+  # switching it for an existing job needs --force.
+  enabled: true
   # Pinned by name and by revision: an upstream update must never silently
   # change what an already-issued transcript would say. The CLI refuses any
   # other value rather than quietly using an unreviewed artifact.

@@ -54,7 +54,7 @@ CONFIG_SCHEMA: dict[str, frozenset[str]] = {
     "audio": frozenset({"asr_filter", "diarization_filter"}),
     "asr": frozenset({"model_variant", "model_dir", "punctuation", "itn", "vad"}),
     "diarization": frozenset(
-        {"model", "revision", "model_dir", "device", "num_speakers"}
+        {"enabled", "model", "revision", "model_dir", "device", "num_speakers"}
     ),
     "merge": frozenset({"max_turn_gap", "nearest_max_gap"}),
     "output": frozenset(
@@ -289,6 +289,18 @@ def _formats(argument: str | None, config: Mapping[str, Any]) -> list[str]:
     return result
 
 
+def _diarization_enabled(args: argparse.Namespace, config: Mapping[str, Any]) -> bool:
+    """Command line beats configuration; the default is to separate speakers."""
+
+    flag = getattr(args, "diarization", None)
+    if flag is not None:
+        return bool(flag)
+    value = _at(config, "diarization", "enabled", default=True)
+    if not isinstance(value, bool):
+        raise PipelineError(f"diarization.enabled must be true or false, got {value!r}.")
+    return value
+
+
 def _resolved_run_options(
     args: argparse.Namespace, config: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -323,6 +335,7 @@ def _resolved_run_options(
     asr_filter = _at(config, "audio", "asr_filter", default=DEFAULT_ASR_FILTER)
     diarization_filter = _at(config, "audio", "diarization_filter")
     return {
+        "diarization": _diarization_enabled(args, config),
         "num_speakers": num_speakers,
         "asr_filter": str(asr_filter) if asr_filter else None,
         "diarization_filter": str(diarization_filter) if diarization_filter else None,
@@ -405,6 +418,15 @@ def run_pipeline(args: argparse.Namespace) -> Path:
         pyannote_model=MODEL_ID,
         pyannote_revision=MODEL_REVISION,
     )
+    if not options["diarization"]:
+        # Speaker count, device and the diarization filter no longer change the
+        # result, so retuning them must not force a rebuild. The flag itself is
+        # recorded only when off: manifests that predate the option still match.
+        for key in ("num_speakers", "device", "diarization_filter", "nearest_max_gap"):
+            inference_config.pop(key)
+        for key in ("pyannote_model", "pyannote_revision"):
+            inference_config.pop(key)
+        inference_config["diarization"] = False
     if previous and previous.get("config") != inference_config:
         raise PipelineError("Inference/merge options changed; use --force to rebuild.")
     manifest: dict[str, Any] = {
@@ -538,83 +560,99 @@ def run_pipeline(args: argparse.Namespace) -> Path:
         },
     )
 
-    diarization_path = intermediate / "pyannote.json"
-    reused_diarization = False
-    runtime = {
-        "pyannote_audio_version": _distribution_version("pyannote.audio"),
-        "torch_version": _distribution_version("torch"),
-    }
-    if can_reuse("diarization", diarization_path):
-        print("[3/5] Reusing pyannote diarization.", flush=True)
-        diarization_result = load_diarization(diarization_path)
-        reused_diarization = True
-        recorded_runtime = {
-            key: previous_stages.get("diarization", {}).get(key) for key in runtime
+    diarization_result: dict[str, Any] | None = None
+    if options["diarization"]:
+        diarization_path = intermediate / "pyannote.json"
+        reused_diarization = False
+        runtime = {
+            "pyannote_audio_version": _distribution_version("pyannote.audio"),
+            "torch_version": _distribution_version("torch"),
         }
-        changed = [
-            f"{key.removesuffix('_version')} {recorded_runtime[key]} -> {runtime[key]}"
-            for key in runtime
-            if recorded_runtime[key] and runtime[key] and recorded_runtime[key] != runtime[key]
-        ]
-        if changed:
-            # The model itself is pinned by revision, and diarization is the most
-            # expensive stage, so a library upgrade is reported, not acted on.
+        if can_reuse("diarization", diarization_path):
+            print("[3/5] Reusing pyannote diarization.", flush=True)
+            diarization_result = load_diarization(diarization_path)
+            reused_diarization = True
+            recorded_runtime = {
+                key: previous_stages.get("diarization", {}).get(key) for key in runtime
+            }
+            changed = [
+                f"{key.removesuffix('_version')} {recorded_runtime[key]} -> {runtime[key]}"
+                for key in runtime
+                if recorded_runtime[key]
+                and runtime[key]
+                and recorded_runtime[key] != runtime[key]
+            ]
+            if changed:
+                # The model itself is pinned by revision, and diarization is the most
+                # expensive stage, so a library upgrade is reported, not acted on.
+                print(
+                    "warning: the reused diarization was produced with "
+                    + ", ".join(changed)
+                    + "; use --force to redo it with the current libraries.",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            runtime = recorded_runtime
+        else:
+            recomputed.add("diarization")
             print(
-                "warning: the reused diarization was produced with "
-                + ", ".join(changed)
-                + "; use --force to redo it with the current libraries.",
-                file=sys.stderr,
+                f"[3/5] Running pinned Community-1 ({options['num_speakers']} speakers)…",
                 flush=True,
             )
-        runtime = recorded_runtime
+            diarization_result = diarize(
+                prepared.diarization_path,
+                diarization_path,
+                num_speakers=options["num_speakers"],
+                device=options["device"],
+                cache_dir=pyannote_cache_dir,
+                torch_threads=options["torch_threads"],
+                torch_interop_threads=options["torch_interop_threads"],
+                strict_speakers=args.strict_speakers,
+            )
+        labels = sorted(
+            {segment["speaker"] for segment in diarization_result["exclusive_segments"]}
+        )
+        if reused_diarization and len(labels) != options["num_speakers"]:
+            # diarize() already reported this for a fresh run; a resumed run must not
+            # silently accept a mismatch the first run refused.
+            message = (
+                f"Requested {options['num_speakers']} speakers but the reused diarization "
+                f"has {len(labels)} ({', '.join(labels) or 'none'})."
+            )
+            if args.strict_speakers:
+                raise PipelineError(message)
+            print(f"warning: {message}", file=sys.stderr, flush=True)
+        mark(
+            "diarization",
+            {
+                "result": "intermediate/pyannote.json",
+                "model": MODEL_ID,
+                "revision": MODEL_REVISION,
+                **runtime,
+                "speakers": labels,
+                "requested_num_speakers": options["num_speakers"],
+                "speaker_count_matches_request": len(labels) == options["num_speakers"],
+            },
+        )
     else:
-        recomputed.add("diarization")
         print(
-            f"[3/5] Running pinned Community-1 ({options['num_speakers']} speakers)…",
+            "[3/5] Diarization is off: skipping pyannote; every word is attributed "
+            "to one speaker.",
             flush=True,
         )
-        diarization_result = diarize(
-            prepared.diarization_path,
-            diarization_path,
-            num_speakers=options["num_speakers"],
-            device=options["device"],
-            cache_dir=pyannote_cache_dir,
-            torch_threads=options["torch_threads"],
-            torch_interop_threads=options["torch_interop_threads"],
-            strict_speakers=args.strict_speakers,
-        )
-    labels = sorted(
-        {segment["speaker"] for segment in diarization_result["exclusive_segments"]}
-    )
-    if reused_diarization and len(labels) != options["num_speakers"]:
-        # diarize() already reported this for a fresh run; a resumed run must not
-        # silently accept a mismatch the first run refused.
-        message = (
-            f"Requested {options['num_speakers']} speakers but the reused diarization "
-            f"has {len(labels)} ({', '.join(labels) or 'none'})."
-        )
-        if args.strict_speakers:
-            raise PipelineError(message)
-        print(f"warning: {message}", file=sys.stderr, flush=True)
-    mark(
-        "diarization",
-        {
-            "result": "intermediate/pyannote.json",
-            "model": MODEL_ID,
-            "revision": MODEL_REVISION,
-            **runtime,
-            "speakers": labels,
-            "requested_num_speakers": options["num_speakers"],
-            "speaker_count_matches_request": len(labels) == options["num_speakers"],
-        },
-    )
+        mark("diarization", {"skipped": True, "reason": "diarization disabled"})
 
     merged_path = intermediate / "merged.json"
     if can_reuse("merge", merged_path, inputs=("asr", "diarization")):
         print("[4/5] Reusing merged transcript.", flush=True)
         merged = _load_json(merged_path)
     else:
-        print("[4/5] Assigning words by exclusive maximum overlap…", flush=True)
+        print(
+            "[4/5] Assigning words by exclusive maximum overlap…"
+            if diarization_result is not None
+            else "[4/5] Building turns from a single speaker…",
+            flush=True,
+        )
         merged = merge_transcript(
             transcript,
             diarization_result,
@@ -781,7 +819,7 @@ def _model_checks(
                 str(giga_dir) if not missing else "missing " + ", ".join(missing),
             )
         )
-    if pyannote_dir is not None:
+    if pyannote_dir is not None and options["diarization"]:
         repository = "models--" + MODEL_ID.replace("/", "--")
         snapshot = pyannote_dir / repository / "snapshots" / MODEL_REVISION
         present = (snapshot / "config.yaml").is_file()
@@ -826,6 +864,7 @@ def _doctor(args: argparse.Namespace) -> int:
     base = _project_root(config_path)
     # Validate the pin and relevant scalar configuration.
     probe_args = argparse.Namespace(
+        diarization=False if args.no_diarization else None,
         num_speakers=None,
         max_turn_gap=None,
         nearest_max_gap=None,
@@ -854,17 +893,22 @@ def _doctor(args: argparse.Namespace) -> int:
             detail += f" (tools.lock.json pins {pinned}; run download-models.ps1)"
         checks.append(("gigastt version", matches, detail))
     checks.extend(_model_checks(args, config, base, options))
-    for distribution in ("pyannote.audio", "torch", "soundfile", "PyYAML"):
+    # pyannote, torch and the token are only needed to separate speakers.
+    distributions = ("soundfile", "PyYAML")
+    if options["diarization"]:
+        distributions = ("pyannote.audio", "torch", *distributions)
+    for distribution in distributions:
         try:
             version = importlib.metadata.version(distribution)
             checks.append((distribution, True, version))
         except importlib.metadata.PackageNotFoundError:
             checks.append((distribution, False, "not installed"))
-    token_ok = bool(
-        (os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_TOKEN"))
-        not in (None, "", "hf_REPLACE_WITH_YOUR_READ_TOKEN")
-    )
-    checks.append(("HF_TOKEN", token_ok, "set (hidden)" if token_ok else "not set"))
+    if options["diarization"]:
+        token_ok = bool(
+            (os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_TOKEN"))
+            not in (None, "", "hf_REPLACE_WITH_YOUR_READ_TOKEN")
+        )
+        checks.append(("HF_TOKEN", token_ok, "set (hidden)" if token_ok else "not set"))
     for name, ok, detail in checks:
         print(f"[{'OK' if ok else 'FAIL'}] {name}: {detail}")
     return 0 if all(ok for _, ok, _ in checks) else 2
@@ -891,6 +935,14 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--gigastt-exe", "--gigastt", default="gigastt")
     run.add_argument("--model-dir", help="GigaSTT model directory")
     run.add_argument("--num-speakers", type=int)
+    run.add_argument(
+        "--diarization",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Separate speakers with pyannote (default: diarization.enabled, i.e. on). "
+        "--no-diarization does not start pyannote or torch and needs no HF_TOKEN; "
+        "every word is attributed to one speaker",
+    )
     run.add_argument("--speaker-map")
     run.add_argument("--speaker-name", action="append", default=[], metavar="LABEL=NAME")
     run.add_argument("--allow-downmix", action="store_true")
@@ -931,6 +983,11 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument("--config")
     doctor.add_argument("--gigastt-exe", default="gigastt")
     doctor.add_argument("--model-dir", help="GigaSTT model directory to check")
+    doctor.add_argument(
+        "--no-diarization",
+        action="store_true",
+        help="Do not demand the pyannote model, the pyannote/torch packages or HF_TOKEN",
+    )
 
     evaluation = commands.add_parser(
         "evaluate", help="Score a job against a reference transcript checked by ear"

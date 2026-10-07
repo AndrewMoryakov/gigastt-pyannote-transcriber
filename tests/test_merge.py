@@ -1,4 +1,5 @@
 from fourvoices.merge import (
+    SINGLE_SPEAKER,
     align_processed_text,
     assign_speaker,
     build_turns,
@@ -150,3 +151,33 @@ def test_merge_marks_a_turn_resting_on_the_nearest_segment():
     result = merge_transcript(transcript, diarization)
     assert result["words"][0]["assignment"] == "nearest"
     assert result["turns"][0]["uncertain"] is True
+
+
+def test_without_diarization_every_word_has_one_unflagged_speaker():
+    transcript = {
+        "text": "Привет, мир.",
+        "words": [
+            {"word": "привет", "start": 0.0, "end": 0.4, "confidence": 0.9},
+            {"word": "мир", "start": 5.0, "end": 5.4, "confidence": 0.8},
+        ],
+    }
+
+    merged = merge_transcript(transcript, None)
+
+    assert merged["speakers"] == [SINGLE_SPEAKER]
+    assert {word["speaker"] for word in merged["words"]} == {SINGLE_SPEAKER}
+    # No evidence is not weak evidence: an empty annotation would call every
+    # word UNKNOWN and flag every turn, which is what None must not do.
+    assert all(word["assignment"] is None for word in merged["words"])
+    assert not any(word["overlap"] or word["ambiguous"] for word in merged["words"])
+    assert merged["turns"] and not any(turn["uncertain"] for turn in merged["turns"])
+    assert merged["text"] == "Привет, мир."
+
+
+def test_an_empty_annotation_is_not_the_same_as_no_diarization():
+    transcript = {"words": [{"word": "да", "start": 0.0, "end": 0.2, "confidence": 1.0}]}
+
+    merged = merge_transcript(transcript, {"exclusive_segments": [], "segments": []})
+
+    assert merged["speakers"] == ["UNKNOWN"]
+    assert merged["turns"][0]["uncertain"] is True

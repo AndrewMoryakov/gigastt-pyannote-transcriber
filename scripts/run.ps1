@@ -10,6 +10,8 @@ param(
     [int]$NumSpeakers = 4,
     [switch]$AllowDownmix,
     [switch]$StrictSpeakers,
+    # Transcribe without pyannote: no HF_TOKEN, no torch, one speaker label.
+    [switch]$NoDiarization,
 
     # 0 means "let fourvoices decide" (logical processor count). Set an explicit
     # value to pin it, e.g. your physical core count on an SMT CPU.
@@ -67,6 +69,9 @@ foreach ($item in $InputAudio) {
     }
     if ($StrictSpeakers) {
         $arguments += '--strict-speakers'
+    }
+    if ($NoDiarization) {
+        $arguments += '--no-diarization'
     }
     Invoke-UvModule @arguments
 }
