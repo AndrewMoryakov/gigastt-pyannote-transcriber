@@ -1,5 +1,9 @@
 ﻿[CmdletBinding()]
-param()
+param(
+    # Do not demand the pyannote model or its packages even if the configuration
+    # leaves diarization on (see run.ps1 -NoDiarization).
+    [switch]$NoDiarization
+)
 
 . (Join-Path $PSScriptRoot 'common.ps1')
 $repo = Get-RepoRoot
@@ -25,19 +29,21 @@ if (Test-Path -LiteralPath $exe) {
 else {
     $problems.Add('Не найден gigastt.exe. Запустите .\scripts\download-models.ps1.')
 }
-if (-not $env:HF_TOKEN -or $env:HF_TOKEN -eq 'hf_REPLACE_WITH_YOUR_READ_TOKEN') {
-    $problems.Add('Не задан настоящий HF_TOKEN для текущего процесса (или в локальном .env).')
-}
-else {
-    Write-Host '[OK] HF_TOKEN задан (значение не выводится).'
-}
+# HF_TOKEN is checked by the CLI doctor below, which knows whether diarization is
+# on (the configuration or -NoDiarization may turn it off).
 
 if ($problems.Count -gt 0) {
     $problems | ForEach-Object { Write-Error $_ }
     throw "Doctor обнаружил проблем: $($problems.Count)."
 }
 
-Invoke-UvModule doctor `
-    --config (Join-Path $repo 'config\default.yaml') `
-    --gigastt-exe $exe `
-    --model-dir (Join-Path $repo 'models\gigastt')
+$doctorArguments = @(
+    'doctor',
+    '--config', (Join-Path $repo 'config\default.yaml'),
+    '--gigastt-exe', $exe,
+    '--model-dir', (Join-Path $repo 'models\gigastt')
+)
+if ($NoDiarization) {
+    $doctorArguments += '--no-diarization'
+}
+Invoke-UvModule @doctorArguments

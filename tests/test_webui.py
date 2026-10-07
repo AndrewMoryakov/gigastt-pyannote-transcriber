@@ -1,5 +1,6 @@
 import http.client
 import json
+import shutil
 import sys
 import threading
 import time
@@ -308,3 +309,71 @@ def test_failed_job_surfaces_the_cli_error_message(ui, monkeypatch):
 
     assert current["state"] == "failed"
     assert current["error"] == "Existing job belongs to a different input"
+
+
+def test_job_without_diarization_needs_neither_token_nor_pyannote(ui):
+    settings, app, client = ui
+    shutil.rmtree(settings.pyannote_dir)
+    settings.media_dir.mkdir(exist_ok=True)
+    (settings.media_dir / "a.wav").write_bytes(b"x")
+
+    _, status = client.json("GET", "/api/status")
+    assert status["ready"] is False and status["ready_without_diarization"] is True
+
+    refused, data = client.json("POST", "/api/jobs", {"file": "a.wav"})
+    assert refused == 400 and "токен" in data["error"]
+
+    accepted, job = client.json("POST", "/api/jobs", {"file": "a.wav", "diarize": False})
+    assert accepted == 202
+    assert job["options"]["diarize"] is False
+
+
+def test_diarization_off_still_needs_gigastt_and_ffmpeg(ui, monkeypatch):
+    settings, app, client = ui
+    settings.media_dir.mkdir(exist_ok=True)
+    (settings.media_dir / "a.wav").write_bytes(b"x")
+    monkeypatch.setattr(webui, "find_tool", lambda name: None)
+
+    status, data = client.json("POST", "/api/jobs", {"file": "a.wav", "diarize": False})
+
+    assert status == 400 and "не готово" in data["error"]
+
+
+def test_diarize_must_be_a_boolean(ui):
+    _, _, client = ui
+
+    status, data = client.json("POST", "/api/jobs", {"file": "a.wav", "diarize": "no"})
+
+    assert status == 400 and "diarize" in data["error"]
+
+
+def test_command_states_the_diarization_choice_explicitly(ui):
+    settings, app, _ = ui
+
+    def command(**options):
+        job = webui.Job(id="x", file="a.wav", options=options)
+        return app.jobs.command(job)
+
+    on = command(num_speakers=3)
+    assert "--diarization" in on and "--no-diarization" not in on
+    assert on[on.index("--num-speakers") + 1] == "3"
+
+    off = command(diarize=False, num_speakers=3)
+    assert "--no-diarization" in off and "--diarization" not in off
+    assert "--num-speakers" not in off
+
+
+@pytest.mark.parametrize("diarize", [True, False])
+def test_a_job_needs_ffprobe_as_well_as_ffmpeg(ui, monkeypatch, diarize):
+    settings, app, client = ui
+    client.json("POST", "/api/token", {"token": TOKEN})
+    settings.media_dir.mkdir(exist_ok=True)
+    (settings.media_dir / "a.wav").write_bytes(b"x")
+    monkeypatch.setattr(webui, "find_tool", lambda name: None if name == "ffprobe" else name)
+
+    _, status = client.json("GET", "/api/status")
+    assert status["ffmpeg"] is False
+    assert status["ready"] is False and status["ready_without_diarization"] is False
+
+    code, data = client.json("POST", "/api/jobs", {"file": "a.wav", "diarize": diarize})
+    assert code == 400 and "не готово" in data["error"]

@@ -15,6 +15,10 @@ EPSILON = 1e-9
 
 UNKNOWN_SPEAKER = "UNKNOWN"
 
+# The one label every word carries when diarization is switched off. It has the
+# shape of a pyannote label, so a speaker map renames it like any other.
+SINGLE_SPEAKER = "SPEAKER_00"
+
 # A turn is flagged when at least this share of its words lack a confirmed
 # speaker. One hedged word in a long sentence is normal; half of them is not.
 UNCERTAIN_TURN_SHARE = 0.5
@@ -396,15 +400,21 @@ def build_turns(
 
 def merge_transcript(
     transcript: Mapping[str, Any],
-    diarization: Mapping[str, Any],
+    diarization: Mapping[str, Any] | None,
     *,
     max_turn_gap: float = 1.5,
     nearest_max_gap: float = 0.5,
 ) -> dict[str, Any]:
-    """Return an evidence-friendly merged representation."""
+    """Return an evidence-friendly merged representation.
 
-    exclusive = ExclusiveIndex(diarization.get("exclusive_segments", []))
-    regular = OverlapIndex(_validate_segments(diarization.get("segments", [])))
+    ``diarization=None`` means nobody was asked who spoke: every word gets
+    ``SINGLE_SPEAKER`` with no assignment evidence, which is not the same as an
+    empty annotation (that would label every word ``UNKNOWN`` and flag every turn).
+    """
+
+    diarized = diarization is not None
+    exclusive = ExclusiveIndex((diarization or {}).get("exclusive_segments", []))
+    regular = OverlapIndex(_validate_segments((diarization or {}).get("segments", [])))
     source_words = list(transcript.get("words", []))
     display_words, punctuation_alignment_ratio = align_processed_text(
         source_words, str(transcript.get("text", ""))
@@ -412,9 +422,17 @@ def merge_transcript(
     merged_words: list[dict[str, Any]] = []
     for index, source_word in enumerate(source_words):
         start, end = float(source_word["start"]), float(source_word["end"])
-        assignment = speaker_assignment(
-            start, end, exclusive, nearest_max_gap=nearest_max_gap
-        )
+        if diarized:
+            assignment = speaker_assignment(
+                start, end, exclusive, nearest_max_gap=nearest_max_gap
+            )
+        else:
+            assignment = {
+                "speaker": SINGLE_SPEAKER,
+                "overlap_s": 0.0,
+                "assignment": None,
+                "ambiguous": False,
+            }
         merged_words.append(
             {
                 "index": index,

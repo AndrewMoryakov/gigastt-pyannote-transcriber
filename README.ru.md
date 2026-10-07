@@ -20,7 +20,7 @@
 
 *Основная версия документации — английская: [README.md](README.md). Этот файл поддерживается как перевод; при расхождении верным считается английский.*
 
-Версия 0.1.0, только Windows. Нужны учётная запись Hugging Face и read-токен (`HF_TOKEN` требуется при каждой транскрибации), а зафиксированы исполняемый файл GigaSTT и ревизия pyannote (веса, которые он загружает, GigaSTT проверяет сам) — см. [Статус и известные ограничения](#статус-и-известные-ограничения).
+Версия 0.1.0, только Windows. Нужны учётная запись Hugging Face и read-токен (`HF_TOKEN` требуется при каждой транскрибации с разделением по говорящим; при выключенной диаризации он не нужен), а зафиксированы исполняемый файл GigaSTT и ревизия pyannote (веса, которые он загружает, GigaSTT проверяет сам) — см. [Статус и известные ограничения](#статус-и-известные-ограничения).
 
 **Содержание:** [Простыми словами](#простыми-словами) · [Что внутри](#что-внутри) · [Как это работает](#как-это-работает) · [Быстрый старт](#быстрый-старт) · [Порядок запуска](#порядок-запуска-коротко) · [Требования](#требования) · [Доступ к Hugging Face](#однократный-доступ-к-gated-модели-hugging-face) · [Настройка на чистой машине](#быстрый-старт-на-чистой-windows) · [Каталог задания](#что-лежит-в-каталоге-задания) · [Имена говорящих](#назначение-говорящих-вручную) · [Обработка звука](#как-обрабатывается-звук) · [Почему такие параметры](#почему-параметры-именно-такие) · [Пометки](#что-помечается-в-транскрипте) · [Субтитры](#субтитры) · [Как слово получает говорящего](#как-слово-получает-говорящего) · [Выходные файлы](#выходные-файлы-подробно) · [Конфигурация](#справочник-по-конфигурации) · [Справочник команд](#справочник-команд) · [Безопасность](#безопасность-и-воспроизводимость) · [Диагностика](#диагностика) · [Статус](#статус-и-известные-ограничения) · [Карта документов](#карта-документации)
 
@@ -121,7 +121,7 @@ CLI печатает пять этапов по ходу работы, и каж
 |---|---|---|---|
 | 1 | `[1/5] Preparing separate ASR and diarization audio…` | `audio/asr.wav`, `audio/diarization.wav` | `audio` |
 | 2 | `[2/5] Running GigaSTT RNNT…` (или `Reusing GigaSTT timestamps.`) | `intermediate/gigastt.json` | `asr` |
-| 3 | `[3/5] Running pinned Community-1 (N speakers)…` (или `Reusing pyannote diarization.`) | `intermediate/pyannote.json` | `diarization` |
+| 3 | `[3/5] Running pinned Community-1 (N speakers)…` (или `Reusing pyannote diarization.`; `Diarization is off…` при `--no-diarization`) | `intermediate/pyannote.json` (при выключенной — нет) | `diarization` |
 | 4 | `[4/5] Assigning words by exclusive maximum overlap…` (или `Reusing merged transcript.`) | `intermediate/merged.json` | `merge` |
 | 5 | `[5/5] Rendering …` | `transcript.{md,txt,srt,vtt,json}` | `render` |
 
@@ -163,7 +163,8 @@ $env:HF_TOKEN = [Net.NetworkCredential]::new('', $secureToken).Password
 | 8 | `.\scripts\run.ps1 -InputAudio '.\media\запись.m4a'` | каждая запись |
 | 9 | Прослушать кластеры, заполнить speaker-map, `.\scripts\rerender.ps1` | после прогона |
 
-**`HF_TOKEN` нужен не только для скачивания, но и при каждой транскрибации:**
+**`HF_TOKEN` нужен не только для скачивания, но и при каждой транскрибации** (кроме
+транскрибации без разделения по говорящим, см. ниже):
 диаризация отказывается стартовать без него, даже когда все веса уже лежат на
 диске. Если удалить токен из окружения после установки, шаг 8 остановится с
 `error: Set HF_TOKEN...`. Либо задавайте токен в каждом новом окне PowerShell,
@@ -253,6 +254,17 @@ Copy-Item 'D:\Аудио\беседа-2.m4a' .\media\
 ```
 
 Если говорящих не четверо, укажите их число: `-NumSpeakers 3`.
+
+**Без разделения по говорящим.** Если в записи один голос или нужен только текст,
+добавьте `-NoDiarization` (CLI: `--no-diarization`; YAML: `diarization.enabled: false`;
+веб-интерфейс: снимите галочку «разделять по говорящим»). pyannote и torch не
+запускаются, `HF_TOKEN` для запуска не нужен (пакеты остаются установленными). Для
+машины, которая не будет разделять говорящих, `download-models.ps1 -SkipPyannote`
+скачивает только GigaSTT без токена, а `doctor.ps1` оставляет проверку токена CLI-доктору, который пропускает её при выключенной диаризации (`-NoDiarization` или конфиг). Все слова приписываются
+одному говорящему, `SPEAKER_00`, и ни одна реплика не помечается как сомнительная;
+карта говорящих по-прежнему может переименовать эту метку. В манифесте этап записан
+как пропущенный, `doctor --no-diarization` не требует pyannote и токен, а переключение
+существующего задания между режимами требует `--force`.
 
 Файлы обрабатываются **строго последовательно**, чтобы два тяжёлых CPU-задания
 не конкурировали за память. Результаты по умолчанию появятся в соседнем с
@@ -633,6 +645,7 @@ cue — неверная временная метка хуже длинного
 | `asr.model_dir` | `models/gigastt` | каталог моделей GigaSTT |
 | `asr.punctuation`, `asr.itn` | `true` | пунктуация и нормализация чисел (`true`/`false` или `auto`/`on`/`off`) |
 | `asr.vad` | `true` | определение речевой активности |
+| `diarization.enabled` | `true` | `false` — транскрибация без pyannote (один говорящий, без токена); `--diarization` / `--no-diarization` её переопределяют |
 | `diarization.model`, `diarization.revision` | Community-1 и его зафиксированная ревизия | должны совпадать с зафиксированными значениями, иначе запуск отвергается |
 | `diarization.model_dir` | `models/pyannote` | каталог кэша Hugging Face для модели |
 | `diarization.device` | `cpu` | зафиксированная сборка PyTorch — только CPU |
@@ -643,7 +656,7 @@ cue — неверная временная метка хуже длинного
 | `output.mark_uncertain_words` | `true` | добавлять пометку `спикер под вопросом` |
 | `output.subtitle_max_seconds`, `output.subtitle_max_chars` | `6`, `84` | пределы субтитра; `0` отключает предел |
 
-**Что требует `--force`.** Опции, влияющие на результат, — это число говорящих, оба аудиофильтра, вариант модели, пунктуация, ITN, VAD, устройство, два порога пауз, `--allow-downmix` и зафиксированные модель и ревизия. Если манифест существует и любая из них отличается, `run` останавливается с сообщением `Inference/merge options changed; use --force to rebuild.`. Число потоков PyTorch, каталоги и опции `output.*` его не вызывают: опции вывода применяются на этапе рендера, который выполняется при каждом запуске.
+**Что требует `--force`.** Опции, влияющие на результат, — это включена ли диаризация, число говорящих, оба аудиофильтра, вариант модели, пунктуация, ITN, VAD, устройство, два порога пауз, `--allow-downmix` и зафиксированные модель и ревизия. Если манифест существует и любая из них отличается, `run` останавливается с сообщением `Inference/merge options changed; use --force to rebuild.`. Число потоков PyTorch, каталоги и опции `output.*` его не вызывают: опции вывода применяются на этапе рендера, который выполняется при каждом запуске.
 
 **Что переопределяет `run.ps1`.** Обёртка всегда явно передаёт `--output-root`, `--num-speakers` и `--model-dir` (и `--config`). Поэтому через `run.ps1` каталог вывода, число говорящих и каталог моделей GigaSTT берутся из параметров скрипта (`-OutputRoot`, `-NumSpeakers` — по умолчанию 4, и `models\gigastt`), а не из `project.output_root`, `diarization.num_speakers` или `asr.model_dir` в YAML. Чтобы использовать значения из YAML, вызывайте CLI напрямую.
 
@@ -659,8 +672,8 @@ cue — неверная временная метка хуже длинного
 |---|---|---|
 | `install.ps1` | `-InstallFfmpeg`, `-SkipSync` | требует 64-разрядную Windows; ставит `uv` через winget, если его нет; ставит управляемый Python 3.11; создаёт `.venv` и устанавливает зафиксированные CPU-зависимости (`uv sync`); с `-InstallFfmpeg` ставит ffmpeg через winget; создаёт `media`, `models`, `tools\bin`, `tools\downloads` |
 | `download-models.ps1` | `-SkipGigaStt`, `-SkipPyannote`, `-Force` | скачивает GigaSTT v2.21.0 для Windows x64 (до 3 попыток), сверяет его SHA-256 с `tools/tools.lock.json`, распаковывает, запускает `gigastt download` для RNNT INT8 (до 3 попыток), выполняет односекундную тихую пробу, чтобы модели пунктуации и VAD скачались сейчас, затем предзагружает модель pyannote по зафиксированной ревизии (нужен `HF_TOKEN`) |
-| `doctor.ps1` | нет | проверяет `uv`, `ffmpeg`, `ffprobe`, исполняемый файл GigaSTT и `HF_TOKEN`, затем запускает doctor из CLI (ниже) |
-| `run.ps1` | `-InputAudio` (один или несколько файлов), `-OutputRoot`, `-Config`, `-SpeakerMap`, `-NumSpeakers` (1–32, по умолчанию 4), `-AllowDownmix`, `-StrictSpeakers`, `-TorchThreads`, `-TorchInteropThreads` | обрабатывает файлы по одному, выставляет `GIGASTT_OFFLINE=1` и каталоги моделей пунктуации/VAD для GigaSTT и вызывает `fourvoices run`; `-Force` нет |
+| `doctor.ps1` | `-NoDiarization` | проверяет `uv`, `ffmpeg`, `ffprobe` и исполняемый файл GigaSTT, затем запускает doctor из CLI (ниже), который проверяет `HF_TOKEN`, если диаризация не выключена |
+| `run.ps1` | `-InputAudio` (один или несколько файлов), `-OutputRoot`, `-Config`, `-SpeakerMap`, `-NumSpeakers` (1–32, по умолчанию 4), `-AllowDownmix`, `-StrictSpeakers`, `-NoDiarization`, `-TorchThreads`, `-TorchInteropThreads` | обрабатывает файлы по одному, выставляет `GIGASTT_OFFLINE=1` и каталоги моделей пунктуации/VAD для GigaSTT и вызывает `fourvoices run`; `-Force` нет |
 | `rerender.ps1` | `-JobDir`, `-SpeakerMap` (оба обязательны) | вызывает `fourvoices render` для готового задания |
 | `evaluate.ps1` | `-JobDir` (позиционный), `-Reference` (обязателен), `-Start`, `-End` | вызывает `fourvoices evaluate`: сравнивает готовое задание с эталонной расшифровкой и пишет `evaluation.json` в каталог задания |
 | `test.ps1` | нет | запускает проверку гигиены, затем `ruff check src tests`, затем `pytest` |
@@ -674,10 +687,10 @@ cue — неверная временная метка хуже длинного
 
 | Команда | Опции |
 |---|---|
-| `run` | `--input` (обязательно), `--output-root`, `--config`, `--gigastt-exe`, `--model-dir`, `--num-speakers`, `--speaker-map`, `--speaker-name LABEL=NAME` (повторяется), `--allow-downmix`, `--strict-speakers`, `--force`, `--ffmpeg`, `--ffprobe`, `--model-variant`, `--punctuation auto\|on\|off`, `--itn auto\|on\|off`, `--no-vad`, `--encoder-threads`, `--torch-threads`, `--torch-interop-threads`, `--device`, `--max-turn-gap`, `--nearest-max-gap`, `--formats`, `--output-stem` |
+| `run` | `--input` (обязательно), `--output-root`, `--config`, `--gigastt-exe`, `--model-dir`, `--num-speakers`, `--speaker-map`, `--speaker-name LABEL=NAME` (повторяется), `--allow-downmix`, `--strict-speakers`, `--diarization` / `--no-diarization`, `--force`, `--ffmpeg`, `--ffprobe`, `--model-variant`, `--punctuation auto\|on\|off`, `--itn auto\|on\|off`, `--no-vad`, `--encoder-threads`, `--torch-threads`, `--torch-interop-threads`, `--device`, `--max-turn-gap`, `--nearest-max-gap`, `--formats`, `--output-stem` |
 | `render` | `--job-dir` (обязательно), `--speaker-map`, `--speaker-name LABEL=NAME`, `--formats`, `--output-stem`, `--subtitle-max-seconds`, `--subtitle-max-chars`, `--mark-uncertain` / `--no-mark-uncertain` |
 | `diarize-preload` | `--model`, `--revision`, `--model-dir` (принимаются только зафиксированные модель и ревизия) |
-| `doctor` | `--config`, `--gigastt-exe`, `--model-dir` (принимается, но не используется) |
+| `doctor` | `--config`, `--gigastt-exe`, `--model-dir` (принимается, но не используется), `--no-diarization` |
 | `evaluate` | `--job-dir` (обязательно), `--reference` (обязательно), `--start`, `--end`, `--output` (по умолчанию `<job>/evaluation.json`) |
 
 Замечания по CLI:

@@ -18,7 +18,7 @@
 
 Around that core the repository ships eight PowerShell scripts (install, download and verify models, doctor, run, re-render, evaluate, test, repository hygiene), a five-command CLI (`run`, `render`, `diarize-preload`, `doctor`, `evaluate`), a schema-validated configuration file, resumable job directories with a manifest, a speaker-map re-render step that needs no inference, and a pytest suite with a Windows CI workflow.
 
-It is version 0.1.0 and Windows-only. It needs a Hugging Face account and read token (`HF_TOKEN` is required for every transcription run), and the GigaSTT executable and the pyannote revision are pinned (GigaSTT itself verifies the weights it loads) — see [Status and known limits](#status-and-known-limits).
+It is version 0.1.0 and Windows-only. It needs a Hugging Face account and read token (`HF_TOKEN` is required for every transcription run that separates speakers; with diarization switched off it is not needed), and the GigaSTT executable and the pyannote revision are pinned (GigaSTT itself verifies the weights it loads) — see [Status and known limits](#status-and-known-limits).
 
 **Contents:** [In plain words](#in-plain-words) · [What's inside](#whats-inside) · [How it works](#how-it-works) · [Quick start](#quick-start) · [Run checklist](#run-checklist) · [Requirements](#requirements) · [Hugging Face access](#one-time-access-to-the-gated-hugging-face-model) · [Setup on a clean machine](#quick-start-on-a-clean-windows-machine) · [Job directory](#what-a-job-directory-contains) · [Speaker names](#assigning-speakers-by-hand) · [Audio processing](#how-the-audio-is-processed) · [Why these defaults](#why-the-defaults-are-what-they-are) · [Markers](#what-gets-marked-in-the-transcript) · [Subtitles](#subtitles) · [How words get a speaker](#how-words-get-a-speaker) · [Output files](#output-files-in-detail) · [Configuration](#configuration-reference) · [Command reference](#command-reference) · [Security](#security-and-reproducibility) · [Troubleshooting](#troubleshooting) · [Status](#status-and-known-limits) · [Docs map](#documentation-map)
 
@@ -119,7 +119,7 @@ The CLI prints the five stages as it goes, and each stage leaves a file and a ma
 |---|---|---|---|
 | 1 | `[1/5] Preparing separate ASR and diarization audio…` | `audio/asr.wav`, `audio/diarization.wav` | `audio` |
 | 2 | `[2/5] Running GigaSTT RNNT…` (or `Reusing GigaSTT timestamps.`) | `intermediate/gigastt.json` | `asr` |
-| 3 | `[3/5] Running pinned Community-1 (N speakers)…` (or `Reusing pyannote diarization.`) | `intermediate/pyannote.json` | `diarization` |
+| 3 | `[3/5] Running pinned Community-1 (N speakers)…` (or `Reusing pyannote diarization.`; `Diarization is off…` with `--no-diarization`) | `intermediate/pyannote.json` (none when off) | `diarization` |
 | 4 | `[4/5] Assigning words by exclusive maximum overlap…` (or `Reusing merged transcript.`) | `intermediate/merged.json` | `merge` |
 | 5 | `[5/5] Rendering …` | `transcript.{md,txt,srt,vtt,json}` | `render` |
 
@@ -161,7 +161,8 @@ is explained in detail further down.
 | 8 | `.\scripts\run.ps1 -InputAudio '.\media\recording.m4a'` | per recording |
 | 9 | Listen to the clusters, fill in a speaker map, `.\scripts\rerender.ps1` | after a run |
 
-**`HF_TOKEN` is needed for transcription, not only for downloading.**
+**`HF_TOKEN` is needed for transcription, not only for downloading** (unless you
+transcribe without speaker separation, see below).
 Diarization refuses to start without it even when every weight is already on
 disk. If you clear the token from the environment after installing, step 8
 stops with `error: Set HF_TOKEN...`. Either set the token in each new
@@ -252,6 +253,17 @@ Copy-Item 'D:\Audio\interview-b.m4a' .\media\
 ```
 
 If there are not four speakers, say so: `-NumSpeakers 3`.
+
+**Without speaker separation.** For a recording with one voice, or when you only
+want the text, add `-NoDiarization` (CLI: `--no-diarization`; YAML:
+`diarization.enabled: false`; web UI: untick "разделять по говорящим"). pyannote and
+torch are not started and the run needs no `HF_TOKEN` (they stay installed). For
+a machine that will never separate speakers, `download-models.ps1 -SkipPyannote` fetches
+only GigaSTT without a token, and `doctor.ps1` leaves the token check to the CLI doctor, which skips it when diarization is off (`-NoDiarization` or the config). Every
+word is attributed to one speaker, `SPEAKER_00`, and no turn is marked as uncertain;
+a speaker map can still rename that label. The stage is recorded in the manifest as
+skipped, `doctor --no-diarization` stops asking for pyannote and the token, and
+switching an existing job between the two modes needs `--force`.
 
 Files are processed **strictly one at a time**, so that two heavy CPU jobs do
 not compete for memory. Results land by default in `gigastt-pyannote-output\`
@@ -632,6 +644,7 @@ All five files are written from `intermediate/merged.json`; `render` can regener
 | `asr.model_dir` | `models/gigastt` | GigaSTT model directory |
 | `asr.punctuation`, `asr.itn` | `true` | punctuation and number normalisation (`true`/`false` or `auto`/`on`/`off`) |
 | `asr.vad` | `true` | voice-activity detection |
+| `diarization.enabled` | `true` | `false` transcribes without pyannote (one speaker, no token); `--diarization` / `--no-diarization` override it |
 | `diarization.model`, `diarization.revision` | Community-1 and its pinned revision | must equal the pinned values or the run is refused |
 | `diarization.model_dir` | `models/pyannote` | Hugging Face cache directory for the model |
 | `diarization.device` | `cpu` | the pinned PyTorch build is CPU-only |
@@ -642,7 +655,7 @@ All five files are written from `intermediate/merged.json`; `render` can regener
 | `output.mark_uncertain_words` | `true` | add the `спикер под вопросом` marker |
 | `output.subtitle_max_seconds`, `output.subtitle_max_chars` | `6`, `84` | subtitle cue limits; `0` disables a limit |
 
-**What triggers `--force`.** The result-affecting options are the speaker count, both audio filters, the model variant, punctuation, ITN, VAD, the device, the two merge gaps, `--allow-downmix` and the pinned model and revision. If a manifest exists and any of them differ, `run` stops with `Inference/merge options changed; use --force to rebuild.`. PyTorch thread counts, directories and the `output.*` options do not trigger it: output options are applied in the render stage, which runs every time.
+**What triggers `--force`.** The result-affecting options are whether diarization is on, the speaker count, both audio filters, the model variant, punctuation, ITN, VAD, the device, the two merge gaps, `--allow-downmix` and the pinned model and revision. If a manifest exists and any of them differ, `run` stops with `Inference/merge options changed; use --force to rebuild.`. PyTorch thread counts, directories and the `output.*` options do not trigger it: output options are applied in the render stage, which runs every time.
 
 **What `run.ps1` overrides.** The wrapper always passes `--output-root`, `--num-speakers` and `--model-dir` (and `--config`) explicitly. Through `run.ps1` the output directory, the speaker count and the GigaSTT model directory therefore come from the script's parameters (`-OutputRoot`, `-NumSpeakers`, default 4, and `models\gigastt`), not from `project.output_root`, `diarization.num_speakers` or `asr.model_dir` in the YAML. To use the YAML values, call the CLI directly.
 
@@ -658,8 +671,8 @@ All scripts stop on the first error. The scripts print their own messages in Rus
 |---|---|---|
 | `install.ps1` | `-InstallFfmpeg`, `-SkipSync` | requires 64-bit Windows; installs `uv` through winget if missing; installs a managed Python 3.11; creates `.venv` and installs the pinned CPU dependencies (`uv sync`); with `-InstallFfmpeg` installs ffmpeg through winget; creates `media`, `models`, `tools\bin`, `tools\downloads` |
 | `download-models.ps1` | `-SkipGigaStt`, `-SkipPyannote`, `-Force` | downloads GigaSTT v2.21.0 for Windows x64 (up to 3 attempts), checks its SHA-256 against `tools/tools.lock.json`, unpacks it, runs `gigastt download` for RNNT INT8 (up to 3 attempts), runs a one-second silent probe so the punctuation and VAD models are fetched now, then preloads the pyannote model at the pinned revision (needs `HF_TOKEN`) |
-| `doctor.ps1` | none | checks `uv`, `ffmpeg`, `ffprobe`, the GigaSTT executable and `HF_TOKEN`, then runs the CLI doctor (below) |
-| `run.ps1` | `-InputAudio` (one or more files), `-OutputRoot`, `-Config`, `-SpeakerMap`, `-NumSpeakers` (1–32, default 4), `-AllowDownmix`, `-StrictSpeakers`, `-TorchThreads`, `-TorchInteropThreads` | processes the files one at a time, sets `GIGASTT_OFFLINE=1` and the GigaSTT punctuation/VAD model directories, and calls `fourvoices run`; has no `-Force` |
+| `doctor.ps1` | `-NoDiarization` | checks `uv`, `ffmpeg`, `ffprobe` and the GigaSTT executable, then runs the CLI doctor (below), which checks `HF_TOKEN` unless diarization is off |
+| `run.ps1` | `-InputAudio` (one or more files), `-OutputRoot`, `-Config`, `-SpeakerMap`, `-NumSpeakers` (1–32, default 4), `-AllowDownmix`, `-StrictSpeakers`, `-NoDiarization`, `-TorchThreads`, `-TorchInteropThreads` | processes the files one at a time, sets `GIGASTT_OFFLINE=1` and the GigaSTT punctuation/VAD model directories, and calls `fourvoices run`; has no `-Force` |
 | `rerender.ps1` | `-JobDir`, `-SpeakerMap` (both required) | calls `fourvoices render` for a finished job |
 | `evaluate.ps1` | `-JobDir` (positional), `-Reference` (required), `-Start`, `-End` | calls `fourvoices evaluate`: scores a finished job against a reference transcript and writes `evaluation.json` into the job directory |
 | `test.ps1` | none | runs the hygiene check, then `ruff check src tests`, then `pytest` |
@@ -673,10 +686,10 @@ The scripts call it as `uv run --python 3.11 python -m fourvoices.cli <command>`
 
 | Command | Options |
 |---|---|
-| `run` | `--input` (required), `--output-root`, `--config`, `--gigastt-exe`, `--model-dir`, `--num-speakers`, `--speaker-map`, `--speaker-name LABEL=NAME` (repeatable), `--allow-downmix`, `--strict-speakers`, `--force`, `--ffmpeg`, `--ffprobe`, `--model-variant`, `--punctuation auto\|on\|off`, `--itn auto\|on\|off`, `--no-vad`, `--encoder-threads`, `--torch-threads`, `--torch-interop-threads`, `--device`, `--max-turn-gap`, `--nearest-max-gap`, `--formats`, `--output-stem` |
+| `run` | `--input` (required), `--output-root`, `--config`, `--gigastt-exe`, `--model-dir`, `--num-speakers`, `--speaker-map`, `--speaker-name LABEL=NAME` (repeatable), `--allow-downmix`, `--strict-speakers`, `--diarization` / `--no-diarization`, `--force`, `--ffmpeg`, `--ffprobe`, `--model-variant`, `--punctuation auto\|on\|off`, `--itn auto\|on\|off`, `--no-vad`, `--encoder-threads`, `--torch-threads`, `--torch-interop-threads`, `--device`, `--max-turn-gap`, `--nearest-max-gap`, `--formats`, `--output-stem` |
 | `render` | `--job-dir` (required), `--speaker-map`, `--speaker-name LABEL=NAME`, `--formats`, `--output-stem`, `--subtitle-max-seconds`, `--subtitle-max-chars`, `--mark-uncertain` / `--no-mark-uncertain` |
 | `diarize-preload` | `--model`, `--revision`, `--model-dir` (the pinned model and revision are the only accepted values) |
-| `doctor` | `--config`, `--gigastt-exe`, `--model-dir` (accepted but not used) |
+| `doctor` | `--config`, `--gigastt-exe`, `--model-dir` (accepted but not used), `--no-diarization` |
 | `evaluate` | `--job-dir` (required), `--reference` (required), `--start`, `--end`, `--output` (default `<job>/evaluation.json`) |
 
 Notes on the CLI:
