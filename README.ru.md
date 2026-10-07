@@ -260,7 +260,7 @@ Copy-Item 'D:\Аудио\беседа-2.m4a' .\media\
 веб-интерфейс: снимите галочку «разделять по говорящим»). pyannote и torch не
 запускаются, `HF_TOKEN` для запуска не нужен (пакеты остаются установленными). Для
 машины, которая не будет разделять говорящих, `download-models.ps1 -SkipPyannote`
-скачивает только GigaSTT без токена, а `doctor.ps1 -NoDiarization` перестаёт его требовать. Все слова приписываются
+скачивает только GigaSTT без токена, а `doctor.ps1` оставляет проверку токена CLI-доктору, который пропускает её при выключенной диаризации (`-NoDiarization` или конфиг). Все слова приписываются
 одному говорящему, `SPEAKER_00`, и ни одна реплика не помечается как сомнительная;
 карта говорящих по-прежнему может переименовать эту метку. В манифесте этап записан
 как пропущенный, `doctor --no-diarization` не требует pyannote и токен, а переключение
@@ -672,7 +672,7 @@ cue — неверная временная метка хуже длинного
 |---|---|---|
 | `install.ps1` | `-InstallFfmpeg`, `-SkipSync` | требует 64-разрядную Windows; ставит `uv` через winget, если его нет; ставит управляемый Python 3.11; создаёт `.venv` и устанавливает зафиксированные CPU-зависимости (`uv sync`); с `-InstallFfmpeg` ставит ffmpeg через winget; создаёт `media`, `models`, `tools\bin`, `tools\downloads` |
 | `download-models.ps1` | `-SkipGigaStt`, `-SkipPyannote`, `-Force` | скачивает GigaSTT v2.21.0 для Windows x64 (до 3 попыток), сверяет его SHA-256 с `tools/tools.lock.json`, распаковывает, запускает `gigastt download` для RNNT INT8 (до 3 попыток), выполняет односекундную тихую пробу, чтобы модели пунктуации и VAD скачались сейчас, затем предзагружает модель pyannote по зафиксированной ревизии (нужен `HF_TOKEN`) |
-| `doctor.ps1` | `-NoDiarization` | проверяет `uv`, `ffmpeg`, `ffprobe`, исполняемый файл GigaSTT и `HF_TOKEN` (с `-NoDiarization` — без него), затем запускает doctor из CLI (ниже) |
+| `doctor.ps1` | `-NoDiarization` | проверяет `uv`, `ffmpeg`, `ffprobe` и исполняемый файл GigaSTT, затем запускает doctor из CLI (ниже), который проверяет `HF_TOKEN`, если диаризация не выключена |
 | `run.ps1` | `-InputAudio` (один или несколько файлов), `-OutputRoot`, `-Config`, `-SpeakerMap`, `-NumSpeakers` (1–32, по умолчанию 4), `-AllowDownmix`, `-StrictSpeakers`, `-NoDiarization`, `-TorchThreads`, `-TorchInteropThreads` | обрабатывает файлы по одному, выставляет `GIGASTT_OFFLINE=1` и каталоги моделей пунктуации/VAD для GigaSTT и вызывает `fourvoices run`; `-Force` нет |
 | `rerender.ps1` | `-JobDir`, `-SpeakerMap` (оба обязательны) | вызывает `fourvoices render` для готового задания |
 | `evaluate.ps1` | `-JobDir` (позиционный), `-Reference` (обязателен), `-Start`, `-End` | вызывает `fourvoices evaluate`: сравнивает готовое задание с эталонной расшифровкой и пишет `evaluation.json` в каталог задания |

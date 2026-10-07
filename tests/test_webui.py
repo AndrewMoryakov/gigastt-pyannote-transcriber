@@ -361,3 +361,19 @@ def test_command_states_the_diarization_choice_explicitly(ui):
     off = command(diarize=False, num_speakers=3)
     assert "--no-diarization" in off and "--diarization" not in off
     assert "--num-speakers" not in off
+
+
+@pytest.mark.parametrize("diarize", [True, False])
+def test_a_job_needs_ffprobe_as_well_as_ffmpeg(ui, monkeypatch, diarize):
+    settings, app, client = ui
+    client.json("POST", "/api/token", {"token": TOKEN})
+    settings.media_dir.mkdir(exist_ok=True)
+    (settings.media_dir / "a.wav").write_bytes(b"x")
+    monkeypatch.setattr(webui, "find_tool", lambda name: None if name == "ffprobe" else name)
+
+    _, status = client.json("GET", "/api/status")
+    assert status["ffmpeg"] is False
+    assert status["ready"] is False and status["ready_without_diarization"] is False
+
+    code, data = client.json("POST", "/api/jobs", {"file": "a.wav", "diarize": diarize})
+    assert code == 400 and "не готово" in data["error"]

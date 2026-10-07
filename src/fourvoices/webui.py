@@ -450,7 +450,8 @@ class App:
             and (s.gigastt_model_dir / "v3_rnnt_encoder_int8.onnx").is_file(),
             "pyannote": any((s.pyannote_dir).glob("models--*/snapshots/*")),
         }
-        ffmpeg_ok = bool(find_tool("ffmpeg"))
+        # The pipeline probes the input with ffprobe before it converts it.
+        ffmpeg_ok = bool(find_tool("ffmpeg") and find_tool("ffprobe"))
         with contextlib.suppress(OSError):
             s.media_dir.mkdir(exist_ok=True)
         free = shutil.disk_usage(s.repo).free
@@ -459,7 +460,7 @@ class App:
                 "set": bool(TOKEN_RE.match(token)),
                 "masked": mask_token(token) if token else "",
             },
-            "ffmpeg": bool(find_tool("ffmpeg") and find_tool("ffprobe")),
+            "ffmpeg": ffmpeg_ok,
             "models": models,
             "ready": all(models.values()) and ffmpeg_ok,
             # Transcription without speaker separation needs neither the

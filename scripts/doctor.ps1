@@ -1,6 +1,7 @@
 ﻿[CmdletBinding()]
 param(
-    # Do not demand HF_TOKEN, pyannote or torch (see run.ps1 -NoDiarization).
+    # Do not demand the pyannote model or its packages even if the configuration
+    # leaves diarization on (see run.ps1 -NoDiarization).
     [switch]$NoDiarization
 )
 
@@ -28,15 +29,8 @@ if (Test-Path -LiteralPath $exe) {
 else {
     $problems.Add('Не найден gigastt.exe. Запустите .\scripts\download-models.ps1.')
 }
-if ($NoDiarization) {
-    Write-Host '[--] HF_TOKEN не проверяется: диаризация выключена.'
-}
-elseif (-not $env:HF_TOKEN -or $env:HF_TOKEN -eq 'hf_REPLACE_WITH_YOUR_READ_TOKEN') {
-    $problems.Add('Не задан настоящий HF_TOKEN для текущего процесса (или в локальном .env).')
-}
-else {
-    Write-Host '[OK] HF_TOKEN задан (значение не выводится).'
-}
+# HF_TOKEN is checked by the CLI doctor below, which knows whether diarization is
+# on (the configuration or -NoDiarization may turn it off).
 
 if ($problems.Count -gt 0) {
     $problems | ForEach-Object { Write-Error $_ }

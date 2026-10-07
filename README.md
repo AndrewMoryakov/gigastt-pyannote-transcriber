@@ -259,7 +259,7 @@ want the text, add `-NoDiarization` (CLI: `--no-diarization`; YAML:
 `diarization.enabled: false`; web UI: untick "разделять по говорящим"). pyannote and
 torch are not started and the run needs no `HF_TOKEN` (they stay installed). For
 a machine that will never separate speakers, `download-models.ps1 -SkipPyannote` fetches
-only GigaSTT without a token, and `doctor.ps1 -NoDiarization` stops asking for one. Every
+only GigaSTT without a token, and `doctor.ps1` leaves the token check to the CLI doctor, which skips it when diarization is off (`-NoDiarization` or the config). Every
 word is attributed to one speaker, `SPEAKER_00`, and no turn is marked as uncertain;
 a speaker map can still rename that label. The stage is recorded in the manifest as
 skipped, `doctor --no-diarization` stops asking for pyannote and the token, and
@@ -671,7 +671,7 @@ All scripts stop on the first error. The scripts print their own messages in Rus
 |---|---|---|
 | `install.ps1` | `-InstallFfmpeg`, `-SkipSync` | requires 64-bit Windows; installs `uv` through winget if missing; installs a managed Python 3.11; creates `.venv` and installs the pinned CPU dependencies (`uv sync`); with `-InstallFfmpeg` installs ffmpeg through winget; creates `media`, `models`, `tools\bin`, `tools\downloads` |
 | `download-models.ps1` | `-SkipGigaStt`, `-SkipPyannote`, `-Force` | downloads GigaSTT v2.21.0 for Windows x64 (up to 3 attempts), checks its SHA-256 against `tools/tools.lock.json`, unpacks it, runs `gigastt download` for RNNT INT8 (up to 3 attempts), runs a one-second silent probe so the punctuation and VAD models are fetched now, then preloads the pyannote model at the pinned revision (needs `HF_TOKEN`) |
-| `doctor.ps1` | `-NoDiarization` | checks `uv`, `ffmpeg`, `ffprobe`, the GigaSTT executable and `HF_TOKEN` (not with `-NoDiarization`), then runs the CLI doctor (below) |
+| `doctor.ps1` | `-NoDiarization` | checks `uv`, `ffmpeg`, `ffprobe` and the GigaSTT executable, then runs the CLI doctor (below), which checks `HF_TOKEN` unless diarization is off |
 | `run.ps1` | `-InputAudio` (one or more files), `-OutputRoot`, `-Config`, `-SpeakerMap`, `-NumSpeakers` (1–32, default 4), `-AllowDownmix`, `-StrictSpeakers`, `-NoDiarization`, `-TorchThreads`, `-TorchInteropThreads` | processes the files one at a time, sets `GIGASTT_OFFLINE=1` and the GigaSTT punctuation/VAD model directories, and calls `fourvoices run`; has no `-Force` |
 | `rerender.ps1` | `-JobDir`, `-SpeakerMap` (both required) | calls `fourvoices render` for a finished job |
 | `evaluate.ps1` | `-JobDir` (positional), `-Reference` (required), `-Start`, `-End` | calls `fourvoices evaluate`: scores a finished job against a reference transcript and writes `evaluation.json` into the job directory |
